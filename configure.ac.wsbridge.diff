@@ -1,0 +1,23 @@
+diff --git a/configure.ac b/configure.ac
+index d9314d6..c29c708 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1462,6 +1462,10 @@ PKG_CHECK_MODULES([HIREDIS], [hiredis >= 0.10.0],[
+   AM_CONDITIONAL([HAVE_HIREDIS],[true])],[
+   AC_MSG_RESULT([no]); AM_CONDITIONAL([HAVE_HIREDIS],[false])])
+ 
++PKG_CHECK_MODULES([WEBSOCKETS], [libwebsockets >= 0.0.1],[
++  AM_CONDITIONAL([HAVE_WEBSOCKETS],[true])],[
++  AC_MSG_RESULT([no]); AM_CONDITIONAL([HAVE_WEBSOCKETS],[false])])
++
+ AC_ARG_ENABLE(core-libedit-support,     
+   [AS_HELP_STRING([--disable-core-libedit-support], [Compile without libedit Support])])
+ 
+@@ -1858,6 +1862,7 @@ AC_CONFIG_FILES([Makefile
+ 		src/mod/endpoints/mod_unicall/Makefile
+ 		src/mod/endpoints/mod_rtc/Makefile
+ 		src/mod/endpoints/mod_verto/Makefile
++		src/mod/endpoints/mod_wsbridge/Makefile
+ 		src/mod/event_handlers/mod_amqp/Makefile
+ 		src/mod/event_handlers/mod_cdr_csv/Makefile
+ 		src/mod/event_handlers/mod_cdr_mongodb/Makefile
