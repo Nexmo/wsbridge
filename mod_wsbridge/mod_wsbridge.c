@@ -65,16 +65,16 @@
 
 #define PTIME_RTP_MS  20 /*ms*/
 #define WS_TIMEOUT_MS 20  /* same as ptime on the RTP side , lws_service()*/
-#define WS_TIMER_MS 10 /* ws timer tick, half of RTP ptime (r/w) */
+#define WS_TIMER_MS 20 /* ws timer tick, RTP ptime, if set less than this we'll not be able able to relay everything to the RTP side (overwrite) */
 #define FRAMES_NR 50 /*buffer this many frames on the RTP side*/
 
 #define WSBRIDGE_OUTPUT_BUFFER_SIZE (WSBRIDGE_FRAME_SIZE*FRAMES_NR) /* 20 * 5 = 100 ms , 20 * 50 = 1s */
 #define WSBRIDGE_INPUT_BUFFER_SIZE (WSBRIDGE_FRAME_SIZE*1) /* flow control without circular buffer*/
 
-#define RX_BUFFER_SIZE 64 * 1024 * 1024  /*warning: RX_BUFFER_SIZE is also TX_BUFFER_SIZE ! it has to be big, otherwise -> latency problems on send()*/
+#define RX_BUFFER_SIZE 64 * 1024 * 16 /*warning: RX_BUFFER_SIZE is also TX_BUFFER_SIZE ! it has to be big, otherwise -> latency problems on send()*/
 
 #define WSBRIDGE_INTERFACE_NAME "wsbridge" // dialplan: <action application="bridge" data="wsbridge"/>
-#define WSBRIDGE_SIP_HEADER_TOKEN WSBRIDGE_INTERFACE_NAME
+#define WSBRIDGE_SIP_HEADER_TOKEN WSBRIDGE_INTERFACE_NAME 
 
 #define L16_16000   "audio/l16;rate=16000"
 #define L16_8000    "audio/l16;rate=8000"
@@ -83,7 +83,7 @@
 #define HEADER_WS_HEADERS      "P-"WSBRIDGE_SIP_HEADER_TOKEN"-websocket-headers"
 #define HEADER_WS_CONT_TYPE    "P-"WSBRIDGE_SIP_HEADER_TOKEN"-websocket-content-type"
 #define WS_URI_MAX_SIZE         2048
-#define WS_HEADERS_MAX_SIZE     512
+#define WS_HEADERS_MAX_SIZE     1024
 #define WS_CONT_TYPE_MAX_SIZE   50
 
 #define WSBRIDGE_STATE_STARTED 0
@@ -141,7 +141,7 @@ struct private_object {
 	switch_mutex_t *read_mutex;
 	switch_mutex_t *write_mutex;
 	switch_mutex_t *flag_mutex;
-	switch_mutex_t *wsi_mutex;
+	switch_mutex_t *wsi_mutex; // not needed if we call all lws_ funcitons in the same thread.
 	switch_timer_t write_rtp_timer;
 	switch_timer_t ws_timer;
 	cJSON* message;
@@ -162,6 +162,8 @@ struct private_object {
 	unsigned int write_count;
 	int started;
 	switch_bool_t ws_backpressure;
+	switch_bool_t ws_connected;
+	switch_bool_t wscontext_destroyed;
 	unsigned int ws_counter_read; /*stats*/
 	unsigned int rtp_counter_write; /*stats*/
 	unsigned int ws_counter_write; /*stats*/
@@ -246,28 +248,57 @@ static void *SWITCH_THREAD_FUNC wsbridge_thread_run(switch_thread_t *thread, voi
 		return NULL;
 	}
 	while (tech_pvt->started == WSBRIDGE_STATE_STARTED) {
+		context = tech_pvt->context;
 		if (context) {
-			switch_core_timer_next(&tech_pvt->ws_timer);
+			if (switch_core_timer_next(&tech_pvt->ws_timer) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "wsbridge_thread_run(): can't step on timer\n");
+				break;
+			}
 			switch_mutex_lock(tech_pvt->wsi_mutex);
-			context = tech_pvt->context;
-			n = lws_service(context, WS_TIMEOUT_MS);
+			context = tech_pvt->context; // read this again after timer step. 
+			if (context) { 
+				if (globals.debug) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "lws_service() calling on context [%p]\n", (void *)context);
+				}
+				n = lws_service(context, WS_TIMEOUT_MS);
+				if ((tech_pvt->ws_backpressure) && (tech_pvt->ws_connected)) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "RX FLOW CONTROL: [enable receiving] wsi [%p]\n", (void *)tech_pvt->wsi_wsbridge);
+					lws_rx_flow_control(tech_pvt->wsi_wsbridge, 1);
+					tech_pvt->ws_backpressure = 0;
+				} 
+			}
+			switch_mutex_unlock(tech_pvt->wsi_mutex);
+			if (n < 0) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "wsbridge_thread_run(): negative ret from lws_service()\n");
+				goto out;
+			}
 			if (globals.debug) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "lws_service poll [%p]\n", (void *)context);
 			}
-			switch_mutex_unlock(tech_pvt->wsi_mutex);
+		} else {
+			break;
 		}
-		if (n < 0) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "wsbridge_thread_run(): negative ret from lws_service()\n");
-			goto out;
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "th run : switch_thread_self(): %lu\n",  switch_thread_self());
 		}
 	}
 	/*
 	* Destroy the context sequentially, in order to avoid multithreading
 	* issues (segfaults) coming from OpenSSL
 	*/
-out:
+#if 0 
+out:   // close the connection specifically , lws_context_destroy() is doing it too 
 	context = tech_pvt->context;
-	if (context) {
+	if (context && (tech_pvt->wsi_wsbridge)) {
+		switch_mutex_lock(tech_pvt->wsi_mutex);
+		//lws_cancel_service(tech_pvt->context);
+		lws_close_reason(tech_pvt->wsi_wsbridge, LWS_CLOSE_STATUS_NORMAL, NULL, 0);
+		switch_mutex_unlock(tech_pvt->wsi_mutex);
+	}
+#endif 
+
+out:
+	if (context && (!tech_pvt->wscontext_destroyed))  {
 		switch_mutex_lock(globals.mutex);
 		switch_mutex_lock(tech_pvt->wsi_mutex);
 		lws_context_destroy(tech_pvt->context);
@@ -275,6 +306,15 @@ out:
 		switch_mutex_unlock(tech_pvt->wsi_mutex);
 		switch_mutex_unlock(globals.mutex);
 	}
+	
+
+	switch_mutex_lock(globals.mutex);
+	globals.calls--;
+	if (globals.calls < 0) {
+		globals.calls = 0;
+	}
+	switch_mutex_unlock(globals.mutex);
+
 	return NULL;
 }
 
@@ -335,12 +375,10 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 	size_t wlen = len;
 
 
-	globals.debug = 0; // turn it on for more debugging info  
-
 	switch (reason) {
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
 		if (globals.debug) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets client established\n");
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets client established. [%p]\n", (void *)wsi);
 		}
 
 		session = (switch_core_session_t*) lws_wsi_user(wsi);
@@ -378,21 +416,28 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		lws_callback_on_writable(wsi);
 		switch_mutex_unlock(tech_pvt->wsi_mutex);
 
+		tech_pvt->ws_connected = TRUE;
+
 		break;
 
 	case LWS_CALLBACK_CLOSED:
 #ifdef HAVE_WS3
 	case LWS_CALLBACK_CLIENT_CLOSED:
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets: us closing. wsi [%p]\n", (void *)wsi);
+		}
 #endif 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets callback closed\n");
 		session = (switch_core_session_t *)lws_wsi_user(wsi);
+		assert(session != NULL);
 		tech_pvt = switch_core_session_get_private(session);
+
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "WebSockets callback: closed. wsi [%p]\n", (void *)wsi);
 
 		switch_mutex_lock(tech_pvt->flag_mutex);
 		tech_pvt->started = 1;
 		tech_pvt->state = WSBRIDGE_STATE_DESTROY;
 		switch_mutex_unlock(tech_pvt->flag_mutex);
-		
+		tech_pvt->ws_connected = FALSE;
 		channel = switch_core_session_get_channel(session);
 		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
 		break;
@@ -400,7 +445,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_CLIENT_RECEIVE:
 		/* Copy the data into the read_data circular buffer and update the
 		start and end pointers */
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets client received frame of size %zu\n", len);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets client received frame of size [%zu]\n", len);
 		session = (switch_core_session_t *)lws_wsi_user(wsi);  // retrieves userdata which is our session
 		assert(session != NULL);
 		tech_pvt = switch_core_session_get_private(session);
@@ -409,12 +454,12 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 			if (globals.debug) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WS state: destroy\n");
 			}
-			return 0;
+			return -1;
 		}
 
 		if (len < (tech_pvt->frame_sz * sizeof(int16_t))) {
 			switch_log_printf(
-				SWITCH_CHANNEL_LOG,
+				SWITCH_CHANNEL_SESSION_LOG(session),
 				SWITCH_LOG_WARNING,
 				"WebSockets received frame len: [%u] < %d Bytes\n",
 				(unsigned int) len, (int)(tech_pvt->frame_sz * sizeof(int16_t)));
@@ -422,21 +467,23 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 
 		switch_mutex_lock(tech_pvt->read_mutex);
 		if (len > (tech_pvt->frame_sz * sizeof(int16_t))) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, 
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, 
 					"WebSockets RX: truncating payload to [%d] bytes (frame size) original payload len was: [%u]\n", (int)(tech_pvt->frame_sz * sizeof(int16_t)), (unsigned int) len);
 			wlen = tech_pvt->frame_sz * sizeof(int16_t);
 		}
 
 		switch_mutex_lock(tech_pvt->wsi_mutex);
 		if (!lws_is_final_fragment(wsi)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "WebSockets RX: Not final fragment\n");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "WebSockets RX: Not final fragment\n");
 			return 0;
 		}
 		if (lws_frame_is_binary(tech_pvt->wsi_wsbridge)) {
-			memcpy(tech_pvt->read_data, in, wlen);
+			if (tech_pvt->read_data) {
+				memcpy(tech_pvt->read_data, in, wlen);
+			}
 			tech_pvt->read_count = wlen;
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "WebSockets RX: Frame not received in binary mode: [%s] \n", (char *)in);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "WebSockets RX: Frame not received in binary mode: [%s] \n", (char *)in);
 			tech_pvt->read_count = 0;
 		}
 			
@@ -447,11 +494,11 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 			switch_log_printf(
 				SWITCH_CHANNEL_LOG,
 				SWITCH_LOG_WARNING,
-				"WebSockets `remaining_packet_payload` is above zero: %zu\n",
+				"WebSockets `remaining_packet_payload` is above zero: [%zu]\n",
 				n);
 		}
 		if (!(tech_pvt->ws_backpressure) && (len >= (tech_pvt->frame_sz * sizeof(int16_t)))) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "RX FLOW CONTROL: [throttling] wsi [%p]\n", (void *)tech_pvt->wsi_wsbridge);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "RX FLOW CONTROL: [throttling] wsi [%p]\n", (void *)tech_pvt->wsi_wsbridge);
 			lws_rx_flow_control(tech_pvt->wsi_wsbridge, 0);
 			tech_pvt->ws_backpressure = 1;
 		}
@@ -466,16 +513,22 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 	/* because we are protocols[0] ... */
 
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+		session = (switch_core_session_t *)lws_wsi_user(wsi);
+		assert(session != NULL);
+
+		tech_pvt = switch_core_session_get_private(session);
+		assert(tech_pvt != NULL);
+
 		/* If `in` is not null, then there's info about the error */
 		if (in != NULL) {
 			switch_log_printf(
-				SWITCH_CHANNEL_LOG,
+				SWITCH_CHANNEL_SESSION_LOG(session),
 				SWITCH_LOG_ERROR,
 				"WebSockets connection error: %s\n",
 				(char*) in);
 		} else {
 			switch_log_printf(
-				SWITCH_CHANNEL_LOG,
+				SWITCH_CHANNEL_SESSION_LOG(session),
 				SWITCH_LOG_ERROR,
 				"WebSockets connection error.\n");
 		}
@@ -535,9 +588,9 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 
 		if (tech_pvt->state == WSBRIDGE_STATE_DESTROY) {
 			if (globals.debug) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WS state: destroy\n");
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WS state: destroy. \n");
 			}
-			return 0;
+			return -1;
 		}
 
 		switch_mutex_lock(tech_pvt->write_mutex);
@@ -545,18 +598,23 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		if ((tech_pvt->write_count >= (tech_pvt->frame_sz * sizeof(int16_t))) && (tech_pvt->write_count <= tech_pvt->output_buffer_sz)) {
 			if (tech_pvt->write_start + (tech_pvt->frame_sz * sizeof(int16_t)) >= tech_pvt->output_buffer_sz) {
 				uint32_t amount = tech_pvt->output_buffer_sz - tech_pvt->write_start;
-				char *tmp_frame;  
+				char *tmp_frame = NULL;  
 				switch_zmalloc(tmp_frame, tech_pvt->output_buffer_sz);
-				memcpy(tmp_frame, tech_pvt->write_data + tech_pvt->write_start, amount);
-				memcpy(tmp_frame + amount, tech_pvt->write_data + ((tech_pvt->frame_sz * sizeof(int16_t)) - amount), (tech_pvt->frame_sz * sizeof(int16_t) - amount));
-				bytes_sent = websocket_write_back(wsi, LWS_WRITE_BINARY, tmp_frame, tech_pvt->frame_sz * sizeof(int16_t));
-				switch_safe_free(tmp_frame);
+				if (tmp_frame) {
+					if (globals.debug) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "tmp_frame [%p]\n", tmp_frame);
+					}
+					memcpy(tmp_frame, tech_pvt->write_data + tech_pvt->write_start, amount);
+					memcpy(tmp_frame + amount, tech_pvt->write_data + ((tech_pvt->frame_sz * sizeof(int16_t)) - amount), (tech_pvt->frame_sz * sizeof(int16_t) - amount));
+					bytes_sent = websocket_write_back(wsi, LWS_WRITE_BINARY, tmp_frame, tech_pvt->frame_sz * sizeof(int16_t));
+					switch_safe_free(tmp_frame);
+				}
 			} else {
 				bytes_sent = websocket_write_back(wsi, LWS_WRITE_BINARY, tech_pvt->write_data + tech_pvt->write_start, tech_pvt->frame_sz * sizeof(int16_t));
 			}
 
 			tech_pvt->ws_counter_write++;
-
+                   
 			tech_pvt->write_start = (tech_pvt->write_start + bytes_sent) % tech_pvt->output_buffer_sz;
 			if (tech_pvt->write_start >= tech_pvt->output_buffer_sz) {
 				tech_pvt->write_start = 0;
@@ -569,13 +627,16 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 				tech_pvt->write_count = 0;
 				tech_pvt->write_start = 0;
 				tech_pvt->write_end = 0;
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Websockets: LWS Service timeout.\n");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Websockets: LWS Service timeout.\n");
 			}
 		}
 
 		if (tech_pvt->state == WSBRIDGE_STATE_STARTED) {
 			/* Ask for writing on the next service tick */
 			switch_mutex_lock(tech_pvt->wsi_mutex);
+			if (globals.debug) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "wsi [%p] switch_thread_self(): %lu\n", (void *)wsi, switch_thread_self());
+			}
 			lws_callback_on_writable(tech_pvt->wsi_wsbridge);
 			switch_mutex_unlock(tech_pvt->wsi_mutex);
 		}
@@ -598,8 +659,20 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
 		/* timeout on receive */
 		break;
+#endif
+	case LWS_CALLBACK_WSI_CREATE:
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets cb LWS_CALLBACK_WSI_CREATE wsi [%p]\n", (void *)wsi);
+		}
+		break;
+
 	case LWS_CALLBACK_WSI_DESTROY:
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WebSockets cb LWS_CALLBACK_WSI_DESTROY wsi [%p]\n", (void *)wsi);
+		}
 		session = (switch_core_session_t *)lws_wsi_user(wsi);
+		assert(session != NULL);
+
 		tech_pvt = switch_core_session_get_private(session);
 		if (tech_pvt) {
 			switch_mutex_lock(tech_pvt->flag_mutex);
@@ -608,11 +681,12 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 			switch_mutex_unlock(tech_pvt->flag_mutex);
 		}
 
+		tech_pvt->wscontext_destroyed = TRUE; 
+
 		break; 
-#endif 
 	default:
 		if (globals.debug) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unknown reason (%d) for WebSockets callback\n", reason);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unknown reason (%d) for WebSockets callback. wsi [%p] \n", reason, (void *)wsi);
 		}
 		break;
 	}
@@ -703,6 +777,10 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 
 	tech_pvt = switch_core_session_get_private(session);
 
+	if (globals.debug) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "channel_on_destroy(%p)\n", (void *)session);
+	}
+
 	if (tech_pvt) {
 
 		switch_mutex_lock(tech_pvt->flag_mutex);
@@ -742,20 +820,25 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 
 	tech_pvt = switch_core_session_get_private(session);
 	assert(tech_pvt != NULL);
+
+	if (globals.debug) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "channel_on_hangup(%p)\n", (void *)session);
+	}
+
 	switch_clear_flag_locked(tech_pvt, TFLAG_IO);
 	switch_clear_flag_locked(tech_pvt, TFLAG_VOICE);
 
-	/* Cancel service so we don't reference a null context */
+#if 0 // commented out: we'll let the service thread close the connection and free() the context  
 	switch_mutex_lock(tech_pvt->wsi_mutex);
-	if ((tech_pvt->context) && !(tech_pvt->started)) {
-		lws_cancel_service(tech_pvt->context);
+	if ((tech_pvt->wsi_wsbridge) && !(tech_pvt->started)) {
+		lws_close_reason(tech_pvt->wsi_wsbridge, LWS_CLOSE_STATUS_NORMAL, NULL, 0);
 	}
 	switch_mutex_unlock(tech_pvt->wsi_mutex);
-
+#endif 
 
 	/* Kill the service thread */
 	switch_mutex_lock(tech_pvt->flag_mutex);
-	tech_pvt->started = 1;
+	tech_pvt->started = 1;  /*1 means stopped*/
 	if (tech_pvt->state == WSBRIDGE_STATE_STARTED) {
 		tech_pvt->state = WSBRIDGE_STATE_DESTROY;
 	}
@@ -766,12 +849,6 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 				"RX/TX STATS read WS: [%d]  write WS: [%d] read RTP: [%d] write RTP: [%d] PLC: write PLC RTP: [%d] write PLC WS: [%d]\n",
 				tech_pvt->ws_counter_read, tech_pvt->ws_counter_write, tech_pvt->rtp_counter_read, tech_pvt->rtp_counter_write, 
 				tech_pvt->rtp_counter_write_plc, tech_pvt->ws_counter_write_plc);
-	switch_mutex_lock(globals.mutex);
-	globals.calls--;
-	if (globals.calls < 0) {
-		globals.calls = 0;
-	}
-	switch_mutex_unlock(globals.mutex);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -786,6 +863,10 @@ static switch_status_t channel_kill_channel(switch_core_session_t *session, int 
 
 	tech_pvt = switch_core_session_get_private(session);
 	assert(tech_pvt != NULL);
+
+	if (globals.debug) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "channel_kill_channel(%p, %d) tech_pvt: %p\n", (void *)session, sig, (void *)tech_pvt);
+	}
 
 	switch (sig) {
 	case SWITCH_SIG_KILL:
@@ -836,6 +917,11 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 	tech_pvt = switch_core_session_get_private(session);
 	assert(tech_pvt != NULL);
 
+
+	if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
 	if (tech_pvt->state == WSBRIDGE_STATE_DESTROY) {
 		if (globals.debug) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "WS state: destroy\n");
@@ -846,6 +932,10 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 	*frame = NULL;
 
 	switch_core_timer_next(&tech_pvt->write_rtp_timer);
+
+	if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
+		return SWITCH_STATUS_FALSE;
+	}
 
 	switch_mutex_lock(tech_pvt->read_mutex);
 
@@ -867,7 +957,7 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 		if (data) {
 			memset(data, 255, tech_pvt->frame_sz * sizeof(int16_t));
 			if (globals.debug) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "pad silence toward RTP side, frame sz: %d (samples)\n", (int)tech_pvt->frame_sz);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "pad silence toward RTP side, frame sz: %d (samples)\n", (int)tech_pvt->frame_sz);
 			}
 		}
 		tech_pvt->rtp_counter_write_plc++;
@@ -875,15 +965,15 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 	
 	tech_pvt->read_frame.datalen = tech_pvt->frame_sz * sizeof(int16_t);
 	tech_pvt->read_frame.codec = &tech_pvt->read_codec;
-
-	if (tech_pvt->ws_backpressure) {
+#if 0 // moved to lws service thread
+	if ((tech_pvt->ws_backpressure) && (tech_pvt->ws_connected)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "RX FLOW CONTROL: [enable receiving] wsi [%p]\n", (void *)tech_pvt->wsi_wsbridge);
 		switch_mutex_lock(tech_pvt->wsi_mutex);
 		lws_rx_flow_control(tech_pvt->wsi_wsbridge, 1);
 		switch_mutex_unlock(tech_pvt->wsi_mutex);
 		tech_pvt->ws_backpressure = 0;
-	}
-
+	} 
+#endif 
 	/* Set out output frame */
 	*frame = &tech_pvt->read_frame;
 	tech_pvt->read_count = 0;
@@ -906,17 +996,23 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 	tech_pvt = switch_core_session_get_private(session);
 	assert(tech_pvt != NULL);
 
-	if (tech_pvt->state == WSBRIDGE_STATE_DESTROY) {
+	if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "channel_write_frame(): !TFLAG_IO\n");
+		}
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
+	if (tech_pvt->state == WSBRIDGE_STATE_DESTROY) {
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "channel_write_frame(): WSBRIDGE_STATE_DESTROY\n");
+		}
 		return SWITCH_STATUS_FALSE;
 	}
 
 	if (globals.debug) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Writing frame of size %d\n", frame->datalen);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Output circular buffer - write_end: %d, write_count:%d\n", tech_pvt->write_end, tech_pvt->write_count);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Reading RTP frame of size [%d]\n", frame->datalen);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Output circular buffer towards WS - write_end: [%d], write_count:[%d]\n", tech_pvt->write_end, tech_pvt->write_count);
 	}
 
 #if SWITCH_BYTE_ORDER == __BIG_ENDIAN
@@ -941,6 +1037,7 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 
 	switch_mutex_unlock(tech_pvt->write_mutex);
 
+#if 0 // calling lws related functions from another thread -> bad. 
 	switch_mutex_lock(tech_pvt->flag_mutex); // if WS connection is closed the state will be altered, lws_callback_on_writable will access freed memory
 	if (tech_pvt->state == WSBRIDGE_STATE_STARTED) {
 		/* Ask for writing on the next service tick */
@@ -949,7 +1046,7 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 		switch_mutex_unlock(tech_pvt->wsi_mutex);
 	}
 	switch_mutex_unlock(tech_pvt->flag_mutex);
-
+#endif 
 
 	tech_pvt->rtp_counter_read++;
 	// TODO:  check SFF_PLC flag of incoming RTP frame and increment rtp_counter_write_plc
@@ -1017,7 +1114,7 @@ static switch_status_t channel_on_consume_media(switch_core_session_t *session) 
 static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *session, switch_event_t *var_event,
 													switch_caller_profile_t *outbound_profile,
 													switch_core_session_t **new_session, switch_memory_pool_t **pool, switch_originate_flag_t flags,
-													switch_call_cause_t *cancel_cause)
+													switch_call_cause_t *cancel_cause) 
 {
 
 	if ((*new_session = switch_core_session_request(wsbridge_endpoint_interface, SWITCH_CALL_DIRECTION_OUTBOUND, flags, pool)) != 0) {
@@ -1042,7 +1139,6 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 			return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 		}
 
-
 		if (session) {
 			channel = switch_core_session_get_channel(session);
 			assert(channel != NULL);
@@ -1064,6 +1160,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 						SWITCH_LOG_ERROR,
 						"Invalid Websocket destination (unset URI from hdr or CLI)\n");
 				}
+				switch_core_session_destroy(new_session);
 				return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 			}
 		}
@@ -1075,6 +1172,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 					SWITCH_LOG_ERROR,
 					"Invalid Websocket destination (empty URI)\n");
 			}
+			switch_core_session_destroy(new_session);
 			return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 		 }
 
@@ -1138,6 +1236,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 						WS_HEADERS_MAX_SIZE);
 				}
 
+				switch_core_session_destroy(new_session);
 				return SWITCH_CAUSE_MANDATORY_IE_LENGTH_ERROR;
 			}
 
@@ -1154,6 +1253,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 						parsed_ws_headers);
 				}
 
+				switch_core_session_destroy(new_session);
 				return SWITCH_CAUSE_INVALID_IE_CONTENTS;
 			}
 		} else {
@@ -1190,6 +1290,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 		if (wsbridge_codecs_init(tech_pvt, *new_session)) {
 			/* The content type provided is not supported */
+			switch_core_session_destroy(new_session);
 			return SWITCH_CAUSE_SERVICE_NOT_IMPLEMENTED;
 		}
 
@@ -1213,6 +1314,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 			if (session) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Frame size not set!\n");
 			}
+			switch_core_session_destroy(new_session);
 			return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 		}
 
@@ -1272,6 +1374,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 					prot);
 			}
 
+			switch_core_session_destroy(new_session);
 			return SWITCH_CAUSE_INVALID_URL;
 		}
 
@@ -1279,10 +1382,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		tech_pvt->info.protocols = WSBRIDGE_protocols;
 		tech_pvt->info.gid = -1;
 		tech_pvt->info.uid = -1;
-		/*
-		tech_pvt->info.count_threads = 10;
-		tech_pvt->info.fd_limit_per_thread = 100;
-		*/
+		tech_pvt->info.count_threads = 1; 
+		tech_pvt->info.fd_limit_per_thread = 500;  /*save memory, libwebsockets is allocating mem for this at init time ("mem: pollfd map: ")*/
+		
 		/*
 		 * Create the context sequentially, as indicated in the docs - but the
 		 * reason is the same as when calling lws_context_destroy, to avoid
@@ -1291,8 +1393,10 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		switch_mutex_lock(globals.mutex);
 		context = lws_create_context(&tech_pvt->info);
 		switch_mutex_unlock(globals.mutex);
+
 		if (context == NULL) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Creating libwebsocket context failed\n");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "Creating libwebsocket context failed\n");
+			switch_core_session_destroy(new_session);
 			return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 		}
 
@@ -1310,7 +1414,10 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		tech_pvt->i.userdata = (void*)*new_session;
 
 		tech_pvt->i.protocol = WSBRIDGE_protocols[PROTOCOL_WSBRIDGE].name;
+		tech_pvt->ws_connected = FALSE;
+		switch_mutex_lock(tech_pvt->wsi_mutex);
 		tech_pvt->wsi_wsbridge = lws_client_connect_via_info(&tech_pvt->i);
+		switch_mutex_unlock(tech_pvt->wsi_mutex);
 
 		tech_pvt->write_count = 0;
 		tech_pvt->write_start = 0;
@@ -1320,7 +1427,6 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		tech_pvt->read_count = 0;
 
 		tech_pvt->state = WSBRIDGE_STATE_STARTED;
-
 		wsbridge_thread_launch(tech_pvt);
 
 		switch_set_flag_locked(tech_pvt, TFLAG_OUTBOUND);
@@ -1329,7 +1435,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		return SWITCH_CAUSE_SUCCESS;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "Cannot allocate memory\n");
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "Cannot allocate memory or SPS limit reached!\n");
 	return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 
 }
@@ -1530,6 +1636,8 @@ static switch_status_t load_config(void)
 			}
 		}
 	}
+
+	globals.debug = 0; // turn it on for more debugging info  
 
 	if (!globals.dialplan) {
 		set_global_dialplan("default");
