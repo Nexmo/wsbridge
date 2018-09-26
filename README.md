@@ -10,13 +10,13 @@
 
 ### libwebsockets
 
-[libwebsockets](https://libwebsockets.org/) 2.0
+[libwebsockets](https://libwebsockets.org/) 2.4
 
 To install libwebsockets:
 ```
 	git clone git@github.com:warmcat/libwebsockets.git
 	cd libwebsockets
-	git checkout -v v2.0-stable remotes/origin/v2.0-stable
+	git checkout -v v2.4-stable remotes/origin/v2.4-stable
 	mkdir build ; cd build ; cmake .. -DCMAKE_BUILD_TYPE=DEBUG ; make ; make install ; ldconfig ;
 ```
 
@@ -42,7 +42,21 @@ To place an outbound WebSocket connection, the following SIP headers need to be 
 	<action application="set" data="P-wsbridge-websocket-headers={\"text\":\"hello there. how's it going?\"}"/>
 ```
 
+## Calling the WSBridge endpoint from the dialplan . 
+
+```
+<extension name="freeswitch_wsbridge">
+	<condition field="destination_number" expression="^wsbridge$">
+		 <!-- optionally force values that otherwise would be read from the SIP headers here. this will make WSBridge only conenct to this WS URI:  -->
+		 <!-- <action application="set" data="P-wsbridge-websocket-uri=ws://soundboard.nexmodev.com/" /> --> 
+		 <action application="bridge" data="wsbridge"/>
+	 </condition>
+</extension>
+
+```
+
 ## WebSocket Protocol
+
 
 Upon WebSocket connection establishment, **WSBridge** sends an Initial content JSON message over the socket, with the selected content-type and the optional headers, e.g.:
 
