@@ -1031,6 +1031,8 @@ static switch_status_t channel_on_exchange_media(switch_core_session_t *session)
 	tech_pvt->rate_rtp = read_impl.actual_samples_per_second;                   
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Sample rate on the RTP side: [%d]\n", tech_pvt->rate_rtp);
 
+	switch_core_session_rwunlock(peer_session);
+	
 	return SWITCH_STATUS_SUCCESS;
 }
 
