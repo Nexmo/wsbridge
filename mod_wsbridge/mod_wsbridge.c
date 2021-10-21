@@ -435,7 +435,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
 		ws_content_type = (char*) switch_channel_get_variable(channel, HEADER_WS_CONT_TYPE);
 		switch_log_printf(
-			SWITCH_CHANNEL_SESSION_LOG(*new_session),
+			SWITCH_CHANNEL_SESSION_LOG(session),
 			SWITCH_LOG_INFO,
 			"SIP headers, URI [%s], HEADERS [%s], CONTENT-TYPE [%s]",
 			ws_uri,
