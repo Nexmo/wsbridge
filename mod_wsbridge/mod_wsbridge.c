@@ -1310,6 +1310,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		struct lws_context *context;
 		cJSON* json_req = NULL;
 
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(*new_session), SWITCH_LOG_CRIT, "HELLO\n");
 		switch_core_session_add_stream(*new_session, NULL);
 		if ((tech_pvt = (private_t *) switch_core_session_alloc(*new_session, sizeof(private_t))) != 0) {
 			new_channel = switch_core_session_get_channel(*new_session);
