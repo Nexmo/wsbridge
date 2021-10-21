@@ -1323,11 +1323,13 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		if (session) {
 			channel = switch_core_session_get_channel(session);
 			assert(channel != NULL);
-		} 
-		if (channel) {
 			ws_uri =  (char*) switch_channel_get_variable(channel, HEADER_WS_URI);
 			ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
 			ws_content_type = (char*) switch_channel_get_variable(channel, HEADER_WS_CONT_TYPE);
+		} else if (new_channel) {
+			ws_uri =  (char*) switch_channel_get_variable(new_channel, HEADER_WS_URI);
+			ws_headers = (char*) switch_channel_get_variable(new_channel, HEADER_WS_HEADERS);
+			ws_content_type = (char*) switch_channel_get_variable(new_channel, HEADER_WS_CONT_TYPE);
 		}
 
 		if (!ws_uri) {
