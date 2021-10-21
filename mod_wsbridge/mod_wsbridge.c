@@ -1328,9 +1328,17 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 			ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
 			ws_content_type = (char*) switch_channel_get_variable(channel, HEADER_WS_CONT_TYPE);
 		} else if (new_channel) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(*new_session), SWITCH_LOG_CRIT, "INSIDE NEW CHANNEL\n");
 			ws_uri =  (char*) switch_channel_get_variable(new_channel, HEADER_WS_URI);
 			ws_headers = (char*) switch_channel_get_variable(new_channel, HEADER_WS_HEADERS);
 			ws_content_type = (char*) switch_channel_get_variable(new_channel, HEADER_WS_CONT_TYPE);
+			switch_log_printf(
+				SWITCH_CHANNEL_SESSION_LOG(*new_session),
+				SWITCH_LOG_INFO,
+				"SIP headers, URI [%s], HEADERS [%s], CONTENT-TYPE [%s]",
+				ws_uri,
+				ws_headers,
+				ws_content_type);
 		}
 
 		if (!ws_uri) {
