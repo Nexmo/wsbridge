@@ -409,7 +409,8 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		assert(session != NULL);
 
 		tech_pvt = switch_core_session_get_private(session);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n", __func__, cJSON_Print(tech_pvt->message));
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
+						  __func__, cJSON_Print(tech_pvt->message));
 		message = cJSON_PrintUnformatted(tech_pvt->message);
 		/* XXX EASY FIX FOR A STUPID BUG, look into this properly:
 			When the JSON structure is sent with no spaces, the audio we
@@ -866,7 +867,8 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 			cJSON_AddItemToObject(json_req, "content-type", cJSON_CreateString(tech_pvt->content_type));
 		}
 	}
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n", __func__, cJSON_Print(tech_pvt->message));
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
+					  __func__, cJSON_Print(tech_pvt->message));
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "WSBridge: number of current calls: %d\n", globals.calls);
 
