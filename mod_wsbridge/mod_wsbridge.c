@@ -409,7 +409,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		assert(session != NULL);
 
 		tech_pvt = switch_core_session_get_private(session);
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "!!!!!!!!!!! tech_pvt->message = [%s]\n", cJSON_Print(tech_pvt->message));
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n", __func__, cJSON_Print(tech_pvt->message));
 		message = cJSON_PrintUnformatted(tech_pvt->message);
 		/* XXX EASY FIX FOR A STUPID BUG, look into this properly:
 			When the JSON structure is sent with no spaces, the audio we
@@ -823,39 +823,19 @@ switch_status_t wsbridge_tech_init(private_t *tech_pvt, switch_core_session_t *s
 }
 
 cJSON* get_ws_headers(switch_channel_t *channel) {
-
-	char *ws_headers = NULL;
-	char parsed_ws_headers[WS_HEADERS_MAX_SIZE];
-
 	if (channel) {
-		ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
+		char *ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
+		if (!zstr(ws_headers)) {
+			switch_url_decode((char *)ws_headers);
+			wsbridge_str_remove_quotes(ws_headers);
+			if (strlen(ws_headers) < WS_HEADERS_MAX_SIZE) {
+				char parsed_ws_headers[WS_HEADERS_MAX_SIZE];
+				wsbridge_strncpy_null_term(parsed_ws_headers, ws_headers, WS_HEADERS_MAX_SIZE);
+				return cJSON_Parse(parsed_ws_headers);
+			}
+		}
 	}
-
-	if (zstr(ws_headers)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Missing optional \"HEADER_WS_HEADERS\" header. Ignoring.\n");
-		return NULL;
-	}
-
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "SIP headers, HEADERS [%s]", ws_headers);
-
-	switch_url_decode((char *)ws_headers);
-	wsbridge_str_remove_quotes(ws_headers);
-
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Decoded "HEADER_WS_HEADERS": [%s]", ws_headers);
-
-	if (strlen(ws_headers) >= WS_HEADERS_MAX_SIZE) {
-		switch_log_printf(SWITCH_CHANNEL_LOG,
-						  SWITCH_LOG_NOTICE,
-						  "JSON blob [%s] in \"HEADER_WS_HEADERS\" header too long [%d]. Dropping.\n",
-						  ws_headers,
-						  WS_HEADERS_MAX_SIZE);
-		return NULL;
-	}
-
-	wsbridge_strncpy_null_term(parsed_ws_headers, ws_headers, WS_HEADERS_MAX_SIZE);
-
-	return cJSON_Parse(parsed_ws_headers);
-
+	return NULL;
 }
 
 /*
@@ -866,7 +846,6 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 {
 	switch_channel_t *channel;
 	private_t *tech_pvt = NULL;
-	cJSON* json_req = NULL;
 
 	tech_pvt = switch_core_session_get_private(session);
 	assert(tech_pvt != NULL);
@@ -879,16 +858,16 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	globals.calls++;
 	switch_mutex_unlock(globals.mutex);
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, ">>>>>>>>>>> tech_pvt->message = [%s]\n", cJSON_Print(tech_pvt->message));
-	if ((json_req = get_ws_headers(channel))) {
-		if (tech_pvt->message) {
+	if (cJSON_GetArraySize(tech_pvt->message) == 1 && cJSON_HasObjectItem(tech_pvt->message, "content-type")) {
+		cJSON* json_req = NULL;
+		if ((json_req = get_ws_headers(channel))) {
 			cJSON_Delete(tech_pvt->message);
-			tech_pvt->message = NULL;
+			tech_pvt->message = json_req;
+			cJSON_AddItemToObject(json_req, "content-type", cJSON_CreateString(tech_pvt->content_type));
 		}
-		tech_pvt->message = json_req;
-		cJSON_AddItemToObject(json_req, "content-type", cJSON_CreateString(tech_pvt->content_type));
 	}
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "<<<<<<<<<<< tech_pvt->message = [%s]\n", cJSON_Print(tech_pvt->message));
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n", __func__, cJSON_Print(tech_pvt->message));
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "WSBridge: number of current calls: %d\n", globals.calls);
 
 	return SWITCH_STATUS_SUCCESS;
