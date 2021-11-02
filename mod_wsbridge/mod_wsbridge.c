@@ -862,6 +862,9 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	if (cJSON_GetArraySize(tech_pvt->message) == 1 && cJSON_GetObjectItem(tech_pvt->message, "content-type")) {
 		cJSON* json_req = NULL;
 		if ((json_req = get_ws_headers(channel))) {
+			if (cJSON_GetObjectItem(json_req, "content-type")) {
+				cJSON_DeleteItemFromObject(json_req, "content-type");
+			}
 			cJSON_Delete(tech_pvt->message);
 			tech_pvt->message = json_req;
 			cJSON_AddItemToObject(json_req, "content-type", cJSON_CreateString(tech_pvt->content_type));
