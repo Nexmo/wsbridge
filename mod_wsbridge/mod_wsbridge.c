@@ -865,10 +865,10 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 			cJSON_Delete(tech_pvt->message);
 			tech_pvt->message = json_req;
 			cJSON_AddItemToObject(json_req, "content-type", cJSON_CreateString(tech_pvt->content_type));
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
+							  __func__, cJSON_Print(tech_pvt->message));
 		}
 	}
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
-					  __func__, cJSON_Print(tech_pvt->message));
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "WSBridge: number of current calls: %d\n", globals.calls);
 
