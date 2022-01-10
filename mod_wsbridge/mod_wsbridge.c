@@ -410,6 +410,8 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		assert(session != NULL);
 
 		tech_pvt = switch_core_session_get_private(session);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
+						  __func__, cJSON_Print(tech_pvt->message));
 		message = cJSON_PrintUnformatted(tech_pvt->message);
 		/* XXX EASY FIX FOR A STUPID BUG, look into this properly:
 			When the JSON structure is sent with no spaces, the audio we
@@ -832,6 +834,22 @@ switch_status_t wsbridge_tech_init(private_t *tech_pvt, switch_core_session_t *s
 	return SWITCH_STATUS_SUCCESS;
 }
 
+cJSON* get_ws_headers(switch_channel_t *channel) {
+	if (channel) {
+		char *ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
+		if (!zstr(ws_headers)) {
+			switch_url_decode((char *)ws_headers);
+			wsbridge_str_remove_quotes(ws_headers);
+			if (strlen(ws_headers) < WS_HEADERS_MAX_SIZE) {
+				char parsed_ws_headers[WS_HEADERS_MAX_SIZE];
+				wsbridge_strncpy_null_term(parsed_ws_headers, ws_headers, WS_HEADERS_MAX_SIZE);
+				return cJSON_Parse(parsed_ws_headers);
+			}
+		}
+	}
+	return NULL;
+}
+
 /*
 State methods they get called when the state changes to the specific state
 returning SWITCH_STATUS_SUCCESS tells the core to execute the standard state method next
@@ -851,6 +869,20 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	switch_mutex_lock(globals.mutex);
 	globals.calls++;
 	switch_mutex_unlock(globals.mutex);
+
+	if (cJSON_GetArraySize(tech_pvt->message) == 1 && cJSON_GetObjectItem(tech_pvt->message, "content-type")) {
+		cJSON* json_req = NULL;
+		if ((json_req = get_ws_headers(channel))) {
+			if (cJSON_GetObjectItem(json_req, "content-type")) {
+				cJSON_DeleteItemFromObject(json_req, "content-type");
+			}
+			cJSON_Delete(tech_pvt->message);
+			tech_pvt->message = json_req;
+			cJSON_AddItemToObject(json_req, "content-type", cJSON_CreateString(tech_pvt->content_type));
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
+							  __func__, cJSON_Print(tech_pvt->message));
+		}
+	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "WSBridge: number of current calls: %d\n", globals.calls);
 
