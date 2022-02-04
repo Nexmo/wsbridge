@@ -93,6 +93,9 @@
 
 #define DTMF_QUEUE_SIZE 100 /*digits*/
 
+#define EVENT_QUEUE_SIZE 100
+#define EVENT_MESSAGE_MAX_SIZE  1024
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_wsbridge_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_wsbridge_shutdown);
 SWITCH_MODULE_DEFINITION(mod_wsbridge, mod_wsbridge_load, mod_wsbridge_shutdown, NULL);
@@ -154,6 +157,8 @@ struct private_object {
 	struct lws_client_connect_info i;
 	char path[2048];
 	int state;
+	switch_bool_t audio_active;
+	switch_mutex_t *audio_active_mutex;
 	switch_buffer_t *ws_audio_buffer; // [WSBRIDGE_INPUT_BUFFER_SIZE];
 	/* This is the frame that we send on the RTP side*/
 	unsigned char *databuf; // [WSBRIDGE_FRAME_SIZE]; 
@@ -168,6 +173,9 @@ struct private_object {
 	switch_bool_t has_dtmf;
 	switch_queue_t *dtmf_queue;
 	switch_mutex_t *dtmf_mutex;
+	switch_bool_t has_event;
+	switch_queue_t *event_queue;
+	switch_mutex_t *event_mutex;
 	unsigned int ws_counter_read; /*stats*/
 	unsigned int rtp_counter_write; /*stats*/
 	unsigned int ws_counter_write; /*stats*/
@@ -382,6 +390,54 @@ websocket_write_back(struct lws *wsi_in, enum lws_write_protocol type, char *str
 
 	/* Return actually number of bytes written */
 	return n;
+}
+
+void add_content_type(private_t *tech_pvt, cJSON* json) {
+	if (cJSON_GetObjectItem(json, "content-type")) {
+		cJSON_DeleteItemFromObject(json, "content-type");
+	}
+	cJSON_AddItemToObject(json, "content-type", cJSON_CreateString(tech_pvt->content_type));
+}
+
+int is_mute_event(char* event, char* method) {
+	return !strcmp(event, "websocket:media:update") && !strcmp(method, "update");
+}
+
+void on_event(private_t *tech_pvt, cJSON* json) {
+	char* event = NULL;
+	char* method = NULL;
+	int active = 0;
+	event = cJSON_GetObjectItem(json, "event")->valuestring;
+	method = cJSON_GetObjectItem(json, "method")->valuestring;
+	if (is_mute_event(event, method)) {
+		active = cJSON_GetObjectItem(json, "active")->valueint;
+		switch_mutex_lock(tech_pvt->audio_active_mutex);
+		tech_pvt->audio_active = active;
+		switch_mutex_unlock(tech_pvt->audio_active_mutex);
+	}
+}
+
+void send_bugfree_json_message(struct lws *wsi, cJSON* json_message) {
+	char* parsed_message_unformatted = NULL;
+	char* bugfree_message = NULL;
+	size_t size = 0;
+
+	parsed_message_unformatted = cJSON_PrintUnformatted(json_message); // this bug again ?
+	size = strlen(parsed_message_unformatted);
+	bugfree_message = (char*) calloc(size + 2, sizeof(char));
+	assert (bugfree_message != NULL);
+
+	bugfree_message[0] = ' ';
+	strncpy(bugfree_message + 1, parsed_message_unformatted, size);
+
+	switch_log_printf(
+		SWITCH_CHANNEL_LOG,
+		SWITCH_LOG_INFO,
+		"WebSockets sending JSON event: %s\n",
+		bugfree_message);
+
+	websocket_write_back(wsi, LWS_WRITE_TEXT, bugfree_message, strlen(bugfree_message));
+	free(bugfree_message);
 }
 
 static int
@@ -711,6 +767,38 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 			tech_pvt->has_dtmf = FALSE;
 		}
 		switch_mutex_unlock(tech_pvt->dtmf_mutex);
+
+		switch_mutex_lock(tech_pvt->event_mutex);
+
+		if (tech_pvt->has_event && (switch_queue_size(tech_pvt->event_queue))) {
+			// get event
+			char* event_message = NULL;
+			void* pop;
+			if (switch_queue_trypop(tech_pvt->event_queue, &pop) == SWITCH_STATUS_SUCCESS) {
+				event_message = (char *) pop;
+			}
+			// parse json
+			if (event_message) {
+				cJSON *json_message;
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Before parsing json\n");
+				json_message = cJSON_Parse(event_message);
+				if (json_message) {					
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Parsed json\n");
+					// control json event
+					on_event(tech_pvt, json_message);
+					// send json
+					add_content_type(tech_pvt, json_message);
+					send_bugfree_json_message(wsi, json_message);
+				}
+				cJSON_Delete(json_message);
+			}
+			switch_safe_free(pop);
+			// everything has been dequeued. 
+			tech_pvt->has_event = FALSE;
+		}
+		switch_mutex_unlock(tech_pvt->event_mutex);
+
 		switch_mutex_lock(tech_pvt->write_mutex);
 		/* Check if what we have in buffer is enough to compose a frame, and we're skewing */
 		if ((tech_pvt->write_count >= (tech_pvt->frame_sz * sizeof(int16_t))) && (tech_pvt->write_count <= tech_pvt->output_buffer_sz)) {
@@ -826,8 +914,12 @@ switch_status_t wsbridge_tech_init(private_t *tech_pvt, switch_core_session_t *s
 	switch_mutex_init(&tech_pvt->wsi_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_mutex_init(&tech_pvt->dtmf_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_queue_create(&tech_pvt->dtmf_queue, DTMF_QUEUE_SIZE, switch_core_session_get_pool(session));
+	switch_mutex_init(&tech_pvt->event_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+	switch_queue_create(&tech_pvt->event_queue, EVENT_QUEUE_SIZE, switch_core_session_get_pool(session));
+	switch_mutex_init(&tech_pvt->audio_active_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_core_session_set_private(session, tech_pvt);
 	tech_pvt->session = session;
+	tech_pvt->audio_active = TRUE;
 
 	memset(&tech_pvt->i, 0, sizeof(tech_pvt->i));
 
@@ -848,6 +940,36 @@ cJSON* get_ws_headers(switch_channel_t *channel) {
 		}
 	}
 	return NULL;
+}
+
+char* parse_event(char* event_message) {
+	char* parsed_event_message = NULL;
+	if (!zstr(event_message)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"parsin message\n");
+		switch_url_decode((char *)event_message);
+		wsbridge_str_remove_quotes(event_message);
+		if (strlen(event_message) < EVENT_MESSAGE_MAX_SIZE) {
+			switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"copyying\n");
+			parsed_event_message = (char*)calloc(EVENT_MESSAGE_MAX_SIZE, sizeof(char));
+			switch_assert(parsed_event_message != NULL);
+			wsbridge_strncpy_null_term(parsed_event_message, event_message, EVENT_MESSAGE_MAX_SIZE);
+		}
+	}
+
+	return parsed_event_message;
+}
+
+void add_event_to_queue(private_t *tech_pvt, char* parsed_event_message) {
+	switch_mutex_lock(tech_pvt->event_mutex);
+	if ((switch_queue_trypush(tech_pvt->event_queue, parsed_event_message)) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"error pushing queue\n");
+		free(parsed_event_message);
+		switch_mutex_unlock(tech_pvt->event_mutex);
+		return;
+	}
+	tech_pvt->has_event = TRUE;
+	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"pushed in queue\n");
+	switch_mutex_unlock(tech_pvt->event_mutex);
 }
 
 /*
@@ -1213,6 +1335,7 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 {
 	switch_channel_t *channel = NULL;
 	private_t *tech_pvt = NULL;
+	switch_bool_t active;
 
 	channel = switch_core_session_get_channel(session);
 	assert(channel != NULL);
@@ -1232,6 +1355,17 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "channel_write_frame(): WSBRIDGE_STATE_DESTROY\n");
 		}
 		return SWITCH_STATUS_FALSE;
+	}
+
+	// if audio inactive, do not forward rtp to ws buffer...
+	switch_mutex_lock(tech_pvt->audio_active_mutex);
+	active = tech_pvt->audio_active;
+	switch_mutex_unlock(tech_pvt->audio_active_mutex);
+	if (!active) {
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Skip reading RTP frame, audio is inactive\n");
+		}
+		return SWITCH_STATUS_SUCCESS;
 	}
 
 	if (globals.debug) {
@@ -1306,6 +1440,17 @@ static switch_status_t channel_receive_message(switch_core_session_t *session, s
 	case SWITCH_MESSAGE_INDICATE_ANSWER:
 		{
 			channel_answer_channel(session);
+		}
+		break;
+	case SWITCH_MESSAGE_INDICATE_MESSAGE:
+		{
+			char* parsed_event_message = NULL;
+			char* event_message = (char*)msg->string_array_arg[2];
+			parsed_event_message = parse_event(event_message);
+
+			if (parsed_event_message) {
+				add_event_to_queue(tech_pvt, parsed_event_message);
+			}
 		}
 		break;
 	default:
