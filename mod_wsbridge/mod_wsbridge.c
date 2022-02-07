@@ -37,6 +37,7 @@
 #include <switch.h>
 #include <switch_json.h>
 #include <libwebsockets.h>
+//#pragma GCC diagnostic ignored "-Wstringop-truncation"
 
 /*
  * Design Notes
@@ -103,6 +104,41 @@ SWITCH_MODULE_DEFINITION(mod_wsbridge, mod_wsbridge_load, mod_wsbridge_shutdown,
 switch_endpoint_interface_t *wsbridge_endpoint_interface;
 static switch_memory_pool_t *module_pool = NULL;
 static int running = 1;
+
+struct Queue {
+	switch_queue_t *queue;
+	switch_mutex_t *mutex;
+	unsigned int count;
+	unsigned int size;
+};
+
+void Queue_create(struct Queue *q, unsigned int capacity, switch_memory_pool_t *memory_pool) {
+	q->count = 0;
+	q->size = capacity;
+	switch_queue_create(&q->queue, q->size, memory_pool);
+	switch_mutex_init(&q->mutex, SWITCH_MUTEX_NESTED, memory_pool);
+}
+
+switch_status_t Queue_push(struct Queue *q, void *data) {
+	switch_status_t rv = SWITCH_STATUS_FALSE;
+	switch_mutex_lock(q->mutex);
+	if ((q->count < q->size) && ((rv = switch_queue_trypush(q->queue, data)) == SWITCH_STATUS_SUCCESS)) {
+		q->count++;
+	}
+	switch_mutex_unlock(q->mutex);
+	return rv;
+}
+
+switch_status_t Queue_pop(struct Queue *q, void **data) {
+	switch_status_t rv = SWITCH_STATUS_FALSE;
+	*data = NULL;
+	switch_mutex_lock(q->mutex);
+	if ((q->count > 0) && ((rv = switch_queue_trypop(q->queue, data)) == SWITCH_STATUS_SUCCESS)) {
+		q->count--;
+	}
+	switch_mutex_unlock(q->mutex);
+	return rv;
+}
 
 typedef enum {
 	GFLAG_MY_CODEC_PREFS = (1 << 0)
@@ -173,9 +209,7 @@ struct private_object {
 	switch_bool_t has_dtmf;
 	switch_queue_t *dtmf_queue;
 	switch_mutex_t *dtmf_mutex;
-	switch_bool_t has_event;
-	switch_queue_t *event_queue;
-	switch_mutex_t *event_mutex;
+	struct Queue eventQueue;
 	unsigned int ws_counter_read; /*stats*/
 	unsigned int rtp_counter_write; /*stats*/
 	unsigned int ws_counter_write; /*stats*/
@@ -757,23 +791,18 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		}
 		switch_mutex_unlock(tech_pvt->dtmf_mutex);
 
-		switch_mutex_lock(tech_pvt->event_mutex);
-
-		if (tech_pvt->has_event && (switch_queue_size(tech_pvt->event_queue))) {
-			// get event
+		{
 			char* event_message = NULL;
 			void* pop;
-			if (switch_queue_trypop(tech_pvt->event_queue, &pop) == SWITCH_STATUS_SUCCESS) {
+			if (Queue_pop(&tech_pvt->eventQueue, &pop) == SWITCH_STATUS_SUCCESS) {
 				event_message = (char *) pop;
 			}
 			// parse json
 			if (event_message) {
 				cJSON *json_message;
 
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Before parsing json\n");
 				json_message = cJSON_Parse(event_message);
-				if (json_message) {					
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Parsed json\n");
+				if (json_message) {
 					// control json event
 					on_event(tech_pvt, json_message);
 					// send json
@@ -783,10 +812,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 				cJSON_Delete(json_message);
 			}
 			switch_safe_free(pop);
-			// everything has been dequeued. 
-			tech_pvt->has_event = FALSE;
 		}
-		switch_mutex_unlock(tech_pvt->event_mutex);
 
 		switch_mutex_lock(tech_pvt->write_mutex);
 		/* Check if what we have in buffer is enough to compose a frame, and we're skewing */
@@ -903,8 +929,7 @@ switch_status_t wsbridge_tech_init(private_t *tech_pvt, switch_core_session_t *s
 	switch_mutex_init(&tech_pvt->wsi_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_mutex_init(&tech_pvt->dtmf_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_queue_create(&tech_pvt->dtmf_queue, DTMF_QUEUE_SIZE, switch_core_session_get_pool(session));
-	switch_mutex_init(&tech_pvt->event_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
-	switch_queue_create(&tech_pvt->event_queue, EVENT_QUEUE_SIZE, switch_core_session_get_pool(session));
+	Queue_create(&tech_pvt->eventQueue, EVENT_QUEUE_SIZE, switch_core_session_get_pool(session));
 	switch_mutex_init(&tech_pvt->audio_active_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_core_session_set_private(session, tech_pvt);
 	tech_pvt->session = session;
@@ -934,11 +959,9 @@ cJSON* get_ws_headers(switch_channel_t *channel) {
 char* parse_event(char* event_message) {
 	char* parsed_event_message = NULL;
 	if (!zstr(event_message)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"parsin message\n");
 		switch_url_decode((char *)event_message);
 		wsbridge_str_remove_quotes(event_message);
 		if (strlen(event_message) < EVENT_MESSAGE_MAX_SIZE) {
-			switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"copyying\n");
 			parsed_event_message = (char*)calloc(EVENT_MESSAGE_MAX_SIZE, sizeof(char));
 			switch_assert(parsed_event_message != NULL);
 			wsbridge_strncpy_null_term(parsed_event_message, event_message, EVENT_MESSAGE_MAX_SIZE);
@@ -946,19 +969,6 @@ char* parse_event(char* event_message) {
 	}
 
 	return parsed_event_message;
-}
-
-void add_event_to_queue(private_t *tech_pvt, char* parsed_event_message) {
-	switch_mutex_lock(tech_pvt->event_mutex);
-	if ((switch_queue_trypush(tech_pvt->event_queue, parsed_event_message)) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"error pushing queue\n");
-		free(parsed_event_message);
-		switch_mutex_unlock(tech_pvt->event_mutex);
-		return;
-	}
-	tech_pvt->has_event = TRUE;
-	switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"pushed in queue\n");
-	switch_mutex_unlock(tech_pvt->event_mutex);
 }
 
 /*
@@ -1438,7 +1448,12 @@ static switch_status_t channel_receive_message(switch_core_session_t *session, s
 			parsed_event_message = parse_event(event_message);
 
 			if (parsed_event_message) {
-				add_event_to_queue(tech_pvt, parsed_event_message);
+				if ((Queue_push(&tech_pvt->eventQueue, parsed_event_message)) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"error pushing queue\n");
+					free(parsed_event_message);
+					return;
+				}
+				switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"pushed in queue\n");
 			}
 		}
 		break;
