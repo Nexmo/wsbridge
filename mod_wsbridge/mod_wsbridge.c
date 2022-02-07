@@ -37,7 +37,6 @@
 #include <switch.h>
 #include <switch_json.h>
 #include <libwebsockets.h>
-//#pragma GCC diagnostic ignored "-Wstringop-truncation"
 
 /*
  * Design Notes
@@ -1449,11 +1448,11 @@ static switch_status_t channel_receive_message(switch_core_session_t *session, s
 
 			if (parsed_event_message) {
 				if ((Queue_push(&tech_pvt->eventQueue, parsed_event_message)) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"error pushing queue\n");
+					if (globals.debug) {
+						switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"Could not push event to queue\n");
+					}
 					free(parsed_event_message);
-					return;
 				}
-				switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"pushed in queue\n");
 			}
 		}
 		break;
