@@ -796,8 +796,8 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 					send_bugfree_json_message(wsi, json_message);
 				}
 				cJSON_Delete(json_message);
+				switch_safe_free(pop);
 			}
-			switch_safe_free(pop);
 		}
 
 		switch_mutex_lock(tech_pvt->write_mutex);
@@ -926,35 +926,26 @@ switch_status_t wsbridge_tech_init(private_t *tech_pvt, switch_core_session_t *s
 	return SWITCH_STATUS_SUCCESS;
 }
 
-cJSON* get_ws_headers(switch_channel_t *channel) {
-	if (channel) {
-		char *ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
-		if (!zstr(ws_headers)) {
-			switch_url_decode((char *)ws_headers);
-			wsbridge_str_remove_quotes(ws_headers);
-			if (strlen(ws_headers) < WS_HEADERS_MAX_SIZE) {
-				char parsed_ws_headers[WS_HEADERS_MAX_SIZE];
-				wsbridge_strncpy_null_term(parsed_ws_headers, ws_headers, WS_HEADERS_MAX_SIZE);
-				return cJSON_Parse(parsed_ws_headers);
-			}
+switch_status_t url_decode(char *src, char *dst, int size) {
+	switch_status_t rv = SWITCH_STATUS_FALSE;
+	if (!zstr(src)) {
+		switch_url_decode(src);
+		wsbridge_str_remove_quotes(src);
+		if (strlen(src) < size) {
+			wsbridge_strncpy_null_term(dst, src, size);
+			rv = SWITCH_STATUS_SUCCESS;
 		}
 	}
-	return NULL;
+	return rv;
 }
 
-char* parse_event(char* event_message) {
-	char* parsed_event_message = NULL;
-	if (!zstr(event_message)) {
-		switch_url_decode((char *)event_message);
-		wsbridge_str_remove_quotes(event_message);
-		if (strlen(event_message) < EVENT_MESSAGE_MAX_SIZE) {
-			parsed_event_message = (char*)calloc(EVENT_MESSAGE_MAX_SIZE, sizeof(char));
-			switch_assert(parsed_event_message != NULL);
-			wsbridge_strncpy_null_term(parsed_event_message, event_message, EVENT_MESSAGE_MAX_SIZE);
-		}
+cJSON* get_ws_headers(switch_channel_t *channel) {
+	char *ws_headers = (char*) switch_channel_get_variable(channel, HEADER_WS_HEADERS);
+	char parsed_ws_headers[WS_HEADERS_MAX_SIZE];
+	if (url_decode (ws_headers, parsed_ws_headers, sizeof(parsed_ws_headers)) == SWITCH_STATUS_SUCCESS) {
+		return cJSON_Parse(parsed_ws_headers);
 	}
-
-	return parsed_event_message;
+	return NULL;
 }
 
 /*
@@ -1410,6 +1401,20 @@ static switch_status_t channel_answer_channel(switch_core_session_t *session)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static switch_status_t channel_process_message(private_t *tech_pvt, char *event_message)
+{
+	switch_status_t rv = SWITCH_STATUS_FALSE;
+	char parsed_event_message[EVENT_MESSAGE_MAX_SIZE];
+	if (url_decode(event_message, parsed_event_message, sizeof(parsed_event_message))) {
+		if ((rv = Queue_push(&tech_pvt->eventQueue, parsed_event_message)) != SWITCH_STATUS_SUCCESS) {
+			if (globals.debug) {
+				switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"Could not push event to queue\n");
+			}
+		}
+	}
+	return rv;
+}
+
 static switch_status_t channel_receive_message(switch_core_session_t *session, switch_core_session_message_t *msg)
 {
 	switch_channel_t *channel;
@@ -1429,18 +1434,7 @@ static switch_status_t channel_receive_message(switch_core_session_t *session, s
 		break;
 	case SWITCH_MESSAGE_INDICATE_MESSAGE:
 		{
-			char* parsed_event_message = NULL;
-			char* event_message = (char*)msg->string_array_arg[2];
-			parsed_event_message = parse_event(event_message);
-
-			if (parsed_event_message) {
-				if ((Queue_push(&tech_pvt->eventQueue, parsed_event_message)) != SWITCH_STATUS_SUCCESS) {
-					if (globals.debug) {
-						switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"Could not push event to queue\n");
-					}
-					free(parsed_event_message);
-				}
-			}
+			channel_process_message(tech_pvt, (char*)msg->string_array_arg[2]);
 		}
 		break;
 	default:
@@ -2090,23 +2084,3 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_wsbridge_shutdown)
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
-
-
-TLS 4843: net.Server.on(connection): new TLSSocket
-TLS 4843: server _init handle? true
-TLS 4843: server initRead handle? true buffered? 0
-TLS 4843: server onhandshakestart
-TLS 4843: server onerror [Error: 4550209024:error:1408F09C:SSL routines:ssl3_get_record:http request:../deps/openssl/openssl/ssl/record/ssl3_record.c:322:
-] {
-  library: 'SSL routines',
-  function: 'ssl3_get_record',
-  reason: 'http request',
-  code: 'ERR_SSL_HTTP_REQUEST'
-} had? false
-TLS 4843: server emit tlsClientError: [Error: 4550209024:error:1408F09C:SSL routines:ssl3_get_record:http request:../deps/openssl/openssl/ssl/record/ssl3_record.c:322:
-] {
-  library: 'SSL routines',
-  function: 'ssl3_get_record',
-  reason: 'http request',
-  code: 'ERR_SSL_HTTP_REQUEST'
-}
