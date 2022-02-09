@@ -107,23 +107,17 @@ static int running = 1;
 struct Queue {
 	switch_queue_t *queue;
 	switch_mutex_t *mutex;
-	unsigned int count;
-	unsigned int size;
 };
 
 void Queue_create(struct Queue *q, unsigned int capacity, switch_memory_pool_t *memory_pool) {
-	q->count = 0;
-	q->size = capacity;
-	switch_queue_create(&q->queue, q->size, memory_pool);
+	switch_queue_create(&q->queue, capacity, memory_pool);
 	switch_mutex_init(&q->mutex, SWITCH_MUTEX_NESTED, memory_pool);
 }
 
 switch_status_t Queue_push(struct Queue *q, void *data) {
 	switch_status_t rv = SWITCH_STATUS_FALSE;
 	switch_mutex_lock(q->mutex);
-	if ((q->count < q->size) && ((rv = switch_queue_trypush(q->queue, data)) == SWITCH_STATUS_SUCCESS)) {
-		q->count++;
-	}
+	rv = switch_queue_trypush(q->queue, data);
 	switch_mutex_unlock(q->mutex);
 	return rv;
 }
@@ -132,9 +126,7 @@ switch_status_t Queue_pop(struct Queue *q, void **data) {
 	switch_status_t rv = SWITCH_STATUS_FALSE;
 	*data = NULL;
 	switch_mutex_lock(q->mutex);
-	if ((q->count > 0) && ((rv = switch_queue_trypop(q->queue, data)) == SWITCH_STATUS_SUCCESS)) {
-		q->count--;
-	}
+	rv = switch_queue_trypop(q->queue, data);
 	switch_mutex_unlock(q->mutex);
 	return rv;
 }
@@ -791,16 +783,11 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		switch_mutex_unlock(tech_pvt->dtmf_mutex);
 
 		{
-			char* event_message = NULL;
 			void* pop;
 			if (Queue_pop(&tech_pvt->eventQueue, &pop) == SWITCH_STATUS_SUCCESS) {
-				event_message = (char *) pop;
-			}
-			// parse json
-			if (event_message) {
 				cJSON *json_message;
 
-				json_message = cJSON_Parse(event_message);
+				json_message = cJSON_Parse((char *)pop);
 				if (json_message) {
 					// control json event
 					on_event(tech_pvt, json_message);
@@ -2103,3 +2090,23 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_wsbridge_shutdown)
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
+
+
+TLS 4843: net.Server.on(connection): new TLSSocket
+TLS 4843: server _init handle? true
+TLS 4843: server initRead handle? true buffered? 0
+TLS 4843: server onhandshakestart
+TLS 4843: server onerror [Error: 4550209024:error:1408F09C:SSL routines:ssl3_get_record:http request:../deps/openssl/openssl/ssl/record/ssl3_record.c:322:
+] {
+  library: 'SSL routines',
+  function: 'ssl3_get_record',
+  reason: 'http request',
+  code: 'ERR_SSL_HTTP_REQUEST'
+} had? false
+TLS 4843: server emit tlsClientError: [Error: 4550209024:error:1408F09C:SSL routines:ssl3_get_record:http request:../deps/openssl/openssl/ssl/record/ssl3_record.c:322:
+] {
+  library: 'SSL routines',
+  function: 'ssl3_get_record',
+  reason: 'http request',
+  code: 'ERR_SSL_HTTP_REQUEST'
+}
