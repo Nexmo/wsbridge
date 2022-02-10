@@ -440,13 +440,13 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", active);
 		tech_pvt->audio_active = active;
 		if(!active) {
-			reset_write_pointers(tech_pvt);
+			reset_write_indexes(tech_pvt);
 		}
 		switch_mutex_unlock(tech_pvt->audio_active_mutex);
 	}
 }
 
-void reset_write_pointers(private_t *tech_pvt) {
+void reset_write_indexes(private_t *tech_pvt) {
 	switch_mutex_lock(tech_pvt->write_mutex);
 	tech_pvt->write_count = 0;
 	tech_pvt->write_start = 0;
