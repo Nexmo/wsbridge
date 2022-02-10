@@ -1404,12 +1404,14 @@ static switch_status_t channel_answer_channel(switch_core_session_t *session)
 static switch_status_t channel_process_message(private_t *tech_pvt, char *event_message)
 {
 	switch_status_t rv = SWITCH_STATUS_FALSE;
-	char parsed_event_message[EVENT_MESSAGE_MAX_SIZE];
-	if (url_decode(event_message, parsed_event_message, sizeof(parsed_event_message))) {
+	int size = EVENT_MESSAGE_MAX_SIZE;
+	char *parsed_event_message = (char*)calloc(size, sizeof(char));
+	if (url_decode(event_message, parsed_event_message, size) == SWITCH_STATUS_SUCCESS) {
 		if ((rv = Queue_push(&tech_pvt->eventQueue, parsed_event_message)) != SWITCH_STATUS_SUCCESS) {
 			if (globals.debug) {
 				switch_log_printf(SWITCH_CHANNEL_LOG,SWITCH_LOG_DEBUG,"Could not push event to queue\n");
 			}
+			switch_safe_free(parsed_event_message);
 		}
 	}
 	return rv;
