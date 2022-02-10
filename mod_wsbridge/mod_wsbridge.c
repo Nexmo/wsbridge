@@ -438,6 +438,14 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 		active = cJSON_GetObjectItem(json, "active")->valueint;
 		switch_mutex_lock(tech_pvt->audio_active_mutex);
 		tech_pvt->audio_active = active;
+		if(!active) {
+			// restart output buffer
+			switch_mutex_lock(tech_pvt->write_mutex);
+			tech_pvt->write_count = 0;
+			tech_pvt->write_start = 0;
+			tech_pvt->write_end = 0;
+			switch_mutex_unlock(tech_pvt->write_mutex);
+		}
 		switch_mutex_unlock(tech_pvt->audio_active_mutex);
 	}
 }
