@@ -964,10 +964,6 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	assert(channel != NULL);
 	switch_set_flag_locked(tech_pvt, TFLAG_IO);
 
-	switch_mutex_lock(globals.mutex);
-	globals.calls++;
-	switch_mutex_unlock(globals.mutex);
-
 	if (cJSON_GetArraySize(tech_pvt->message) == 1 && cJSON_GetObjectItem(tech_pvt->message, "content-type")) {
 		cJSON* json_req = NULL;
 		if ((json_req = get_ws_headers(channel))) {
@@ -982,6 +978,10 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 		}
 	}
 
+	switch_mutex_lock(globals.mutex);
+	globals.calls++;
+	switch_mutex_unlock(globals.mutex);
+	
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "WSBridge: number of current calls: %d\n", globals.calls);
 
 	return SWITCH_STATUS_SUCCESS;
