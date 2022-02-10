@@ -437,17 +437,21 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 	if (is_mute_event(event, method)) {
 		active = cJSON_GetObjectItem(json, "active")->valueint;
 		switch_mutex_lock(tech_pvt->audio_active_mutex);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", active);
 		tech_pvt->audio_active = active;
 		if(!active) {
-			// restart output buffer
-			switch_mutex_lock(tech_pvt->write_mutex);
-			tech_pvt->write_count = 0;
-			tech_pvt->write_start = 0;
-			tech_pvt->write_end = 0;
-			switch_mutex_unlock(tech_pvt->write_mutex);
+			reset_write_pointers(tech_pvt);
 		}
 		switch_mutex_unlock(tech_pvt->audio_active_mutex);
 	}
+}
+
+void reset_write_pointers(private_t *tech_pvt) {
+	switch_mutex_lock(tech_pvt->write_mutex);
+	tech_pvt->write_count = 0;
+	tech_pvt->write_start = 0;
+	tech_pvt->write_end = 0;
+	switch_mutex_unlock(tech_pvt->write_mutex);
 }
 
 void send_bugfree_json_message(struct lws *wsi, cJSON* json_message) {
