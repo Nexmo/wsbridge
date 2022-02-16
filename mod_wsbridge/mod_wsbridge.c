@@ -439,18 +439,20 @@ void reset_ws_write_indexes(private_t *tech_pvt) {
 void on_event(private_t *tech_pvt, cJSON* json) {
 	char* event = NULL;
 	char* method = NULL;
-	int active = 0;
 	event = cJSON_GetObjectItem(json, "event")->valuestring;
 	method = cJSON_GetObjectItem(json, "method")->valuestring;
 	if (is_mute_event(event, method)) {
-		active = cJSON_GetObjectItem(json, "active")->valueint;
-		switch_mutex_lock(tech_pvt->audio_active_mutex);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", active);
-		tech_pvt->audio_active = active;
-		if(!active) {
-			reset_ws_write_indexes(tech_pvt);
+		cJSON* active;
+		active = cJSON_GetObjectItem(json, "active");
+		if (active->type == cJSON_False || active->type == cJSON_True ) {
+			switch_mutex_lock(tech_pvt->audio_active_mutex);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", active->valueint);
+			tech_pvt->audio_active = active->valueint;
+			if(!tech_pvt->audio_active) {
+				reset_ws_write_indexes(tech_pvt);
+			}
+			switch_mutex_unlock(tech_pvt->audio_active_mutex);
 		}
-		switch_mutex_unlock(tech_pvt->audio_active_mutex);
 	}
 }
 
