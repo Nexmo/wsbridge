@@ -465,6 +465,11 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 	char* method = NULL;
 	event = get_valuestring(json, "event");
 	method =  get_valuestring(json, "method");
+
+	if (!event || !method) {
+		return;
+	}
+
 	if (is_mute_event(event, method)) {
 		cJSON* active;
 		active = cJSON_GetObjectItem(json, "active");
