@@ -110,23 +110,23 @@ struct AudioActive {
 };
 
 void AudioActive_create(struct AudioActive *ac, switch_memory_pool_t *memory_pool) {
-        ac->audio_active = TRUE;
-        switch_mutex_init(&ac->mutex, SWITCH_MUTEX_NESTED, memory_pool);
+	ac->audio_active = TRUE;
+	switch_mutex_init(&ac->mutex, SWITCH_MUTEX_NESTED, memory_pool);
 }
 
 void AudioActive_set(struct AudioActive *ac, switch_bool_t value) {
-        switch_mutex_lock(ac->mutex);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", value);
-        ac->audio_active = value;
-        switch_mutex_unlock(ac->mutex);
+	switch_mutex_lock(ac->mutex);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", value);
+	ac->audio_active = value;
+	switch_mutex_unlock(ac->mutex);
 }
 
 switch_bool_t AudioActive_get(struct AudioActive *ac) {
-        switch_bool_t value;
-        switch_mutex_lock(ac->mutex);
-        value = ac->audio_active;
-        switch_mutex_unlock(ac->mutex);
-        return value;
+	switch_bool_t value;
+	switch_mutex_lock(ac->mutex);
+	value = ac->audio_active;
+	switch_mutex_unlock(ac->mutex);
+	return value;
 }
 
 struct Queue {
