@@ -436,6 +436,20 @@ void reset_ws_write_indexes(private_t *tech_pvt) {
 	switch_mutex_unlock(tech_pvt->write_mutex);
 }
 
+void set_audio_active(private_t *tech_pvt, switch_bool_t value) {
+	switch_mutex_lock(tech_pvt->audio_active_mutex);
+	tech_pvt->audio_active = value;
+	switch_mutex_unlock(tech_pvt->audio_active_mutex);
+}
+
+switch_bool_t get_audio_active(private_t *tech_pvt) {
+	switch_bool_t value;
+	switch_mutex_lock(tech_pvt->audio_active_mutex);
+	value = tech_pvt->audio_active;
+	switch_mutex_unlock(tech_pvt->audio_active_mutex);
+	return value;
+}
+
 void on_event(private_t *tech_pvt, cJSON* json) {
 	char* event = NULL;
 	char* method = NULL;
@@ -445,13 +459,11 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 		cJSON* active;
 		active = cJSON_GetObjectItem(json, "active");
 		if (active->type == cJSON_False || active->type == cJSON_True ) {
-			switch_mutex_lock(tech_pvt->audio_active_mutex);
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", active->valueint);
-			tech_pvt->audio_active = active->valueint;
-			if(!tech_pvt->audio_active) {
+			set_audio_active(tech_pvt, active->valueint);
+			if(!get_audio_active(tech_pvt)) {
 				reset_ws_write_indexes(tech_pvt);
 			}
-			switch_mutex_unlock(tech_pvt->audio_active_mutex);
 		}
 	}
 }
