@@ -104,6 +104,31 @@ switch_endpoint_interface_t *wsbridge_endpoint_interface;
 static switch_memory_pool_t *module_pool = NULL;
 static int running = 1;
 
+struct AudioActive {
+        switch_bool_t audio_active;
+        switch_mutex_t *mutex;
+};
+
+void AudioActive_create(struct AudioActive *ac, switch_memory_pool_t *memory_pool) {
+        ac->audio_active = TRUE;
+        switch_mutex_init(&ac->mutex, SWITCH_MUTEX_NESTED, memory_pool);
+}
+
+void AudioActive_set(struct AudioActive *ac, switch_bool_t value) {
+        switch_mutex_lock(ac->mutex);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", value);
+        ac->audio_active = value;
+        switch_mutex_unlock(ac->mutex);
+}
+
+switch_bool_t AudioActive_get(struct AudioActive *ac) {
+        switch_bool_t value;
+        switch_mutex_lock(ac->mutex);
+        value = ac->audio_active;
+        switch_mutex_unlock(ac->mutex);
+        return value;
+}
+
 struct Queue {
 	switch_queue_t *queue;
 	switch_mutex_t *mutex;
@@ -184,8 +209,7 @@ struct private_object {
 	struct lws_client_connect_info i;
 	char path[2048];
 	int state;
-	switch_bool_t audio_active;
-	switch_mutex_t *audio_active_mutex;
+	struct AudioActive audio_active;
 	switch_buffer_t *ws_audio_buffer; // [WSBRIDGE_INPUT_BUFFER_SIZE];
 	/* This is the frame that we send on the RTP side*/
 	unsigned char *databuf; // [WSBRIDGE_FRAME_SIZE]; 
@@ -436,21 +460,6 @@ void reset_ws_write_indexes(private_t *tech_pvt) {
 	switch_mutex_unlock(tech_pvt->write_mutex);
 }
 
-void set_audio_active(private_t *tech_pvt, switch_bool_t value) {
-	switch_mutex_lock(tech_pvt->audio_active_mutex);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", value);
-	tech_pvt->audio_active = value;
-	switch_mutex_unlock(tech_pvt->audio_active_mutex);
-}
-
-switch_bool_t get_audio_active(private_t *tech_pvt) {
-	switch_bool_t value;
-	switch_mutex_lock(tech_pvt->audio_active_mutex);
-	value = tech_pvt->audio_active;
-	switch_mutex_unlock(tech_pvt->audio_active_mutex);
-	return value;
-}
-
 char* get_valuestring(cJSON* json, char* field) {
 	char* valuestring = NULL;
 	cJSON* json_field = NULL;
@@ -475,8 +484,8 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 		cJSON* active;
 		active = cJSON_GetObjectItem(json, "active");
 		if (active && (active->type == cJSON_False || active->type == cJSON_True)) {
-			set_audio_active(tech_pvt, active->valueint);
-			if(!get_audio_active(tech_pvt)) {
+			AudioActive_set(&tech_pvt->audio_active, active->valueint);
+			if(!active->valueint) {
 				reset_ws_write_indexes(tech_pvt);
 			}
 		}
@@ -958,10 +967,9 @@ switch_status_t wsbridge_tech_init(private_t *tech_pvt, switch_core_session_t *s
 	switch_mutex_init(&tech_pvt->dtmf_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_queue_create(&tech_pvt->dtmf_queue, DTMF_QUEUE_SIZE, switch_core_session_get_pool(session));
 	Queue_create(&tech_pvt->eventQueue, EVENT_QUEUE_SIZE, switch_core_session_get_pool(session));
-	switch_mutex_init(&tech_pvt->audio_active_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+	AudioActive_create(&tech_pvt->audio_active, switch_core_session_get_pool(session));
 	switch_core_session_set_private(session, tech_pvt);
 	tech_pvt->session = session;
-	tech_pvt->audio_active = TRUE;
 
 	memset(&tech_pvt->i, 0, sizeof(tech_pvt->i));
 
@@ -1353,7 +1361,6 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 {
 	switch_channel_t *channel = NULL;
 	private_t *tech_pvt = NULL;
-	switch_bool_t active;
 
 	channel = switch_core_session_get_channel(session);
 	assert(channel != NULL);
@@ -1376,10 +1383,7 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 	}
 
 	// if audio inactive, do not forward rtp to ws buffer...
-	switch_mutex_lock(tech_pvt->audio_active_mutex);
-	active = tech_pvt->audio_active;
-	switch_mutex_unlock(tech_pvt->audio_active_mutex);
-	if (!active) {
+	if (!AudioActive_get(&tech_pvt->audio_active)) {
 		if (globals.debug) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Skip reading RTP frame, audio is inactive\n");
 		}
