@@ -450,15 +450,25 @@ switch_bool_t get_audio_active(private_t *tech_pvt) {
 	return value;
 }
 
+char* get_valuestring(cJSON* json, char* field) {
+	char* valuestring = NULL;
+	cJSON* json_field = NULL;
+	json_field = cJSON_GetObjectItem(json, field);
+	if (json_field) {
+		valuestring = json_field->valuestring;
+	}
+	return valuestring;
+}
+
 void on_event(private_t *tech_pvt, cJSON* json) {
 	char* event = NULL;
 	char* method = NULL;
-	event = cJSON_GetObjectItem(json, "event")->valuestring;
-	method = cJSON_GetObjectItem(json, "method")->valuestring;
+	event = get_valuestring(json, "event");
+	method =  get_valuestring(json, "method");
 	if (is_mute_event(event, method)) {
 		cJSON* active;
 		active = cJSON_GetObjectItem(json, "active");
-		if (active->type == cJSON_False || active->type == cJSON_True ) {
+		if (active && (active->type == cJSON_False || active->type == cJSON_True)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Setting channel status. active=[%d]\n", active->valueint);
 			set_audio_active(tech_pvt, active->valueint);
 			if(!get_audio_active(tech_pvt)) {
