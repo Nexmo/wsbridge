@@ -105,8 +105,8 @@ static switch_memory_pool_t *module_pool = NULL;
 static int running = 1;
 
 struct AudioActive {
-        switch_bool_t audio_active;
-        switch_mutex_t *mutex;
+	switch_bool_t audio_active;
+	switch_mutex_t *mutex;
 };
 
 void AudioActive_create(struct AudioActive *ac, switch_memory_pool_t *memory_pool) {
@@ -137,6 +137,15 @@ struct Queue {
 void Queue_create(struct Queue *q, unsigned int capacity, switch_memory_pool_t *memory_pool) {
 	switch_queue_create(&q->queue, capacity, memory_pool);
 	switch_mutex_init(&q->mutex, SWITCH_MUTEX_NESTED, memory_pool);
+}
+
+void Queue_destroy(struct Queue *q) {
+	void* pop;
+	while (switch_queue_trypop(q->queue, &pop) == SWITCH_STATUS_SUCCESS) {
+		switch_safe_free(pop);
+	}
+	switch_queue_term(q->queue);
+	switch_mutex_destroy(q->mutex);
 }
 
 switch_status_t Queue_push(struct Queue *q, void *data) {
@@ -492,7 +501,6 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 	}
 }
 
-
 void send_bugfree_json_message(struct lws *wsi, cJSON* json_message) {
 	char* parsed_message_unformatted = NULL;
 	char* bugfree_message = NULL;
@@ -514,6 +522,25 @@ void send_bugfree_json_message(struct lws *wsi, cJSON* json_message) {
 
 	websocket_write_back(wsi, LWS_WRITE_TEXT, bugfree_message, strlen(bugfree_message));
 	free(bugfree_message);
+}
+
+void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
+{
+	void* pop;
+	if (Queue_pop(&tech_pvt->eventQueue, &pop) == SWITCH_STATUS_SUCCESS) {
+		cJSON *json_message;
+
+		json_message = cJSON_Parse((char *)pop);
+		if (json_message) {
+			// control json event
+			on_event(tech_pvt, json_message);
+			// send json
+			add_content_type(tech_pvt, json_message);
+			send_bugfree_json_message(wsi, json_message);
+		}
+		cJSON_Delete(json_message);
+		switch_safe_free(pop);
+	}
 }
 
 static int
@@ -833,23 +860,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		}
 		switch_mutex_unlock(tech_pvt->dtmf_mutex);
 
-		{
-			void* pop;
-			if (Queue_pop(&tech_pvt->eventQueue, &pop) == SWITCH_STATUS_SUCCESS) {
-				cJSON *json_message;
-
-				json_message = cJSON_Parse((char *)pop);
-				if (json_message) {
-					// control json event
-					on_event(tech_pvt, json_message);
-					// send json
-					add_content_type(tech_pvt, json_message);
-					send_bugfree_json_message(wsi, json_message);
-				}
-				cJSON_Delete(json_message);
-				switch_safe_free(pop);
-			}
-		}
+		wsbridge_process_message(tech_pvt, wsi);
 
 		switch_mutex_lock(tech_pvt->write_mutex);
 		/* Check if what we have in buffer is enough to compose a frame, and we're skewing */
@@ -1118,6 +1129,7 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 		switch_safe_free(tech_pvt->databuf);
 		switch_safe_free(tech_pvt->write_data);
 
+		Queue_destroy(&tech_pvt->eventQueue);
 	}
 
 	return SWITCH_STATUS_SUCCESS;
