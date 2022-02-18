@@ -913,6 +913,33 @@ static switch_status_t channel_on_execute(switch_core_session_t *session)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+void send_bugfree_json_message(struct lws *wsi, cJSON* json_message) {
+	char *message = NULL;
+	if ((message = cJSON_PrintUnformatted(json_message)) != NULL) {
+		char *buf = NULL;
+		asprintf(&buf," %s", message);
+		if (websocket_write_back(wsi, LWS_WRITE_TEXT, buf, strlen(buf)) > 0) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "WebSockets sending JSON event: %s\n", message);
+		}
+		switch_safe_free(buf);
+	}
+}
+
+void sendDisconnectMessage(private_t *tech_pvt) {
+	if (tech_pvt && tech_pvt->wsi_wsbridge) {
+		cJSON *json_message = NULL;
+		if ((json_message = cJSON_CreateObject()) != NULL) {
+			cJSON_AddItemToObject(json_message, "content-type", cJSON_CreateString(tech_pvt->content_type));
+			cJSON_AddItemToObject(json_message, "method", cJSON_CreateString("delete"));
+			cJSON_AddItemToObject(json_message, "event", cJSON_CreateString("websocket:disconnected"));
+			cJSON_AddItemToObject(json_message, "name_1", cJSON_CreateString("value_1"));
+			cJSON_AddItemToObject(json_message, "name_2", cJSON_CreateString("value_2"));
+			send_bugfree_json_message(tech_pvt->wsi_wsbridge, json_message);
+			cJSON_Delete(json_message);
+		}
+	}
+}
+
 static switch_status_t channel_on_destroy(switch_core_session_t *session)
 {
 	switch_channel_t *channel = NULL;
@@ -978,6 +1005,8 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 	if (globals.debug) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "channel_on_hangup(%p)\n", (void *)session);
 	}
+
+	sendDisconnectMessage(tech_pvt);
 
 	switch_clear_flag_locked(tech_pvt, TFLAG_IO);
 	switch_clear_flag_locked(tech_pvt, TFLAG_VOICE);
