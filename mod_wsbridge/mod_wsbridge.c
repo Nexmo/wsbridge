@@ -218,7 +218,6 @@ struct private_object {
 	struct lws_client_connect_info i;
 	char path[2048];
 	int state;
-	struct AudioActive audio_active;
 	switch_buffer_t *ws_audio_buffer; // [WSBRIDGE_INPUT_BUFFER_SIZE];
 	/* This is the frame that we send on the RTP side*/
 	unsigned char *databuf; // [WSBRIDGE_FRAME_SIZE]; 
@@ -234,6 +233,7 @@ struct private_object {
 	switch_queue_t *dtmf_queue;
 	switch_mutex_t *dtmf_mutex;
 	struct Queue eventQueue;
+	struct AudioActive audio_active;
 	unsigned int ws_counter_read; /*stats*/
 	unsigned int rtp_counter_write; /*stats*/
 	unsigned int ws_counter_write; /*stats*/
