@@ -37,6 +37,7 @@
 #include <switch.h>
 #include <switch_json.h>
 #include <libwebsockets.h>
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
 
 /*
  * Design Notes
@@ -501,27 +502,16 @@ void on_event(private_t *tech_pvt, cJSON* json) {
 	}
 }
 
-void send_bugfree_json_message(struct lws *wsi, cJSON* json_message) {
-	char* parsed_message_unformatted = NULL;
-	char* bugfree_message = NULL;
-	size_t size = 0;
-
-	parsed_message_unformatted = cJSON_PrintUnformatted(json_message); // this bug again ?
-	size = strlen(parsed_message_unformatted);
-	bugfree_message = (char*) calloc(size + 2, sizeof(char));
-	assert (bugfree_message != NULL);
-
-	bugfree_message[0] = ' ';
-	strncpy(bugfree_message + 1, parsed_message_unformatted, size);
-
-	switch_log_printf(
-		SWITCH_CHANNEL_LOG,
-		SWITCH_LOG_INFO,
-		"WebSockets sending JSON event: %s\n",
-		bugfree_message);
-
-	websocket_write_back(wsi, LWS_WRITE_TEXT, bugfree_message, strlen(bugfree_message));
-	free(bugfree_message);
+void send_json_message(struct lws *wsi, cJSON* json_message) {
+	char *message = NULL;
+	if ((message = cJSON_PrintUnformatted(json_message)) != NULL) {
+		char *buf = NULL;
+		asprintf(&buf," %s", message);
+		if (websocket_write_back(wsi, LWS_WRITE_TEXT, buf, strlen(buf)) > 0) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "WebSockets sending JSON event: %s\n", message);
+		}
+		switch_safe_free(buf);
+	}
 }
 
 void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
@@ -536,7 +526,7 @@ void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
 			on_event(tech_pvt, json_message);
 			// send json
 			add_content_type(tech_pvt, json_message);
-			send_bugfree_json_message(wsi, json_message);
+			send_json_message(wsi, json_message);
 		}
 		cJSON_Delete(json_message);
 		switch_safe_free(pop);
