@@ -450,17 +450,6 @@ websocket_write_back(struct lws *wsi_in, enum lws_write_protocol type, char *str
 	return n;
 }
 
-void add_content_type(private_t *tech_pvt, cJSON* json) {
-	if (cJSON_GetObjectItem(json, "content-type")) {
-		cJSON_DeleteItemFromObject(json, "content-type");
-	}
-	cJSON_AddItemToObject(json, "content-type", cJSON_CreateString(tech_pvt->content_type));
-}
-
-int is_mute_event(char* event, char* method) {
-	return !strcmp(event, "websocket:media:update") && !strcmp(method, "update");
-}
-
 void reset_ws_write_indexes(private_t *tech_pvt) {
 	switch_mutex_lock(tech_pvt->write_mutex);
 	tech_pvt->write_count = 0;
@@ -479,55 +468,48 @@ char* get_valuestring(cJSON* json, char* field) {
 	return valuestring;
 }
 
-void on_event(private_t *tech_pvt, cJSON* json) {
-	char* event = NULL;
-	char* method = NULL;
-	event = get_valuestring(json, "event");
-	method =  get_valuestring(json, "method");
-
-	if (!event || !method) {
+void send_json_message(struct lws *wsi, cJSON* json_message) {
+	char buf[EVENT_MESSAGE_MAX_SIZE+2];
+	char *ptr = buf;
+	*ptr++ = ' ';
+	if (cJSON_PrintPreallocated(json_message, ptr, sizeof(buf)-1, 0) == FALSE) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "cJSON_PrintPreallocated FAILED\n");
 		return;
 	}
-
-	if (is_mute_event(event, method)) {
-		cJSON* active;
-		active = cJSON_GetObjectItem(json, "active");
-		if (active && (active->type == cJSON_False || active->type == cJSON_True)) {
-			AudioActive_set(&tech_pvt->audio_active, active->valueint);
-			if(!active->valueint) {
-				reset_ws_write_indexes(tech_pvt);
-			}
-		}
+	if (websocket_write_back(wsi, LWS_WRITE_TEXT, buf, strlen(buf)) <= 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "websocket_write_back FAILED\n");
+		return;
 	}
-}
-
-void send_json_message(struct lws *wsi, cJSON* json_message) {
-	char *message = NULL;
-	if ((message = cJSON_PrintUnformatted(json_message)) != NULL) {
-		char *buf = NULL;
-		asprintf(&buf," %s", message);
-		if (websocket_write_back(wsi, LWS_WRITE_TEXT, buf, strlen(buf)) > 0) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "WebSockets sending JSON event: %s\n", message);
-		}
-		switch_safe_free(buf);
-	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "WebSockets sent JSON event: %s\n", buf);
 }
 
 void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
 {
-	void* pop;
-	if (Queue_pop(&tech_pvt->eventQueue, &pop) == SWITCH_STATUS_SUCCESS) {
-		cJSON *json_message;
+	void* pop = NULL;
 
-		json_message = cJSON_Parse((char *)pop);
-		if (json_message) {
-			// control json event
-			on_event(tech_pvt, json_message);
-			// send json
-			add_content_type(tech_pvt, json_message);
+	if (Queue_pop(&tech_pvt->eventQueue, &pop) == SWITCH_STATUS_SUCCESS) {
+		cJSON* json_message = cJSON_Parse((char*)pop);
+
+		if (json_message != NULL) {
+			char *event = get_valuestring(json_message, "event");
+			char *method =  get_valuestring(json_message, "method");
+			cJSON *active = cJSON_GetObjectItem(json_message, "active");
+
+			if (event && !strcmp(event, "websocket:media:update") &&
+				method && !strcmp(method, "update") &&
+				active && cJSON_IsBool(active))
+			{
+				AudioActive_set(&tech_pvt->audio_active, active->valueint);
+				if (!active->valueint) {
+					reset_ws_write_indexes(tech_pvt);
+				}
+			}
+
+			cJSON_AddItemToObject(json_message, "content-type", cJSON_CreateString(tech_pvt->content_type));
 			send_json_message(wsi, json_message);
+
+			cJSON_Delete(json_message);
 		}
-		cJSON_Delete(json_message);
 		switch_safe_free(pop);
 	}
 }
