@@ -467,10 +467,10 @@ void send_json_message(struct lws *wsi, cJSON* json_message) {
 
 void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
 {
-	void* pop = NULL;
+	void *pop = NULL;
 
 	if (Queue_pop(&tech_pvt->eventQueue, &pop) == SWITCH_STATUS_SUCCESS) {
-		cJSON* json_message = cJSON_Parse((char*)pop);
+		cJSON *json_message = cJSON_Parse((char*)pop);
 
 		if (json_message != NULL) {
 			cJSON *event = cJSON_GetObjectItem(json_message, "event");
@@ -480,16 +480,16 @@ void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
 			if (event && !strcmp(event->valuestring, "websocket:media:update") &&
 				method && !strcmp(method->valuestring, "update") &&
 				active && cJSON_IsBool(active))
-				{
-					AudioActive_set(&tech_pvt->audio_active, active->valueint);
-					if (!active->valueint) {
-						switch_mutex_lock(tech_pvt->write_mutex);
-						tech_pvt->write_count = 0;
-						tech_pvt->write_start = 0;
-						tech_pvt->write_end = 0;
-						switch_mutex_unlock(tech_pvt->write_mutex);
-					}
+			{
+				AudioActive_set(&tech_pvt->audio_active, active->valueint);
+				if (!active->valueint) {
+					switch_mutex_lock(tech_pvt->write_mutex);
+					tech_pvt->write_count = 0;
+					tech_pvt->write_start = 0;
+					tech_pvt->write_end = 0;
+					switch_mutex_unlock(tech_pvt->write_mutex);
 				}
+			}
 
 			cJSON_AddItemToObject(json_message, "content-type", cJSON_CreateString(tech_pvt->content_type));
 			send_json_message(wsi, json_message);
