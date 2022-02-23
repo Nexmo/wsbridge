@@ -450,14 +450,6 @@ websocket_write_back(struct lws *wsi_in, enum lws_write_protocol type, char *str
 	return n;
 }
 
-void reset_ws_write_indexes(private_t *tech_pvt) {
-	switch_mutex_lock(tech_pvt->write_mutex);
-	tech_pvt->write_count = 0;
-	tech_pvt->write_start = 0;
-	tech_pvt->write_end = 0;
-	switch_mutex_unlock(tech_pvt->write_mutex);
-}
-
 void send_json_message(struct lws *wsi, cJSON* json_message) {
 	char buf[EVENT_MESSAGE_MAX_SIZE+2];
 	char *ptr = buf;
@@ -491,7 +483,11 @@ void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
 				{
 					AudioActive_set(&tech_pvt->audio_active, active->valueint);
 					if (!active->valueint) {
-						reset_ws_write_indexes(tech_pvt);
+						switch_mutex_lock(tech_pvt->write_mutex);
+						tech_pvt->write_count = 0;
+						tech_pvt->write_start = 0;
+						tech_pvt->write_end = 0;
+						switch_mutex_unlock(tech_pvt->write_mutex);
 					}
 				}
 
