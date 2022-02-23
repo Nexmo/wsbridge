@@ -458,16 +458,6 @@ void reset_ws_write_indexes(private_t *tech_pvt) {
 	switch_mutex_unlock(tech_pvt->write_mutex);
 }
 
-char* get_valuestring(cJSON* json, char* field) {
-	char* valuestring = NULL;
-	cJSON* json_field = NULL;
-	json_field = cJSON_GetObjectItem(json, field);
-	if (json_field) {
-		valuestring = json_field->valuestring;
-	}
-	return valuestring;
-}
-
 void send_json_message(struct lws *wsi, cJSON* json_message) {
 	char buf[EVENT_MESSAGE_MAX_SIZE+2];
 	char *ptr = buf;
@@ -491,19 +481,19 @@ void wsbridge_process_message(private_t *tech_pvt, struct lws *wsi)
 		cJSON* json_message = cJSON_Parse((char*)pop);
 
 		if (json_message != NULL) {
-			char *event = get_valuestring(json_message, "event");
-			char *method =  get_valuestring(json_message, "method");
+			cJSON *event = cJSON_GetObjectItem(json_message, "event");
+			cJSON *method = cJSON_GetObjectItem(json_message, "method");
 			cJSON *active = cJSON_GetObjectItem(json_message, "active");
 
-			if (event && !strcmp(event, "websocket:media:update") &&
-				method && !strcmp(method, "update") &&
+			if (event && !strcmp(event->valuestring, "websocket:media:update") &&
+				method && !strcmp(method->valuestring, "update") &&
 				active && cJSON_IsBool(active))
-			{
-				AudioActive_set(&tech_pvt->audio_active, active->valueint);
-				if (!active->valueint) {
-					reset_ws_write_indexes(tech_pvt);
+				{
+					AudioActive_set(&tech_pvt->audio_active, active->valueint);
+					if (!active->valueint) {
+						reset_ws_write_indexes(tech_pvt);
+					}
 				}
-			}
 
 			cJSON_AddItemToObject(json_message, "content-type", cJSON_CreateString(tech_pvt->content_type));
 			send_json_message(wsi, json_message);
