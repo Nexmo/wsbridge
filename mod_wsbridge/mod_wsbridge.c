@@ -183,6 +183,7 @@ typedef enum {
 
 static struct {
 	int debug;
+	int enable_control_events;
 	char *ip;
 	int port;
 	char *dialplan;
@@ -817,7 +818,9 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		}
 		switch_mutex_unlock(tech_pvt->dtmf_mutex);
 
-		wsbridge_process_message(tech_pvt, wsi);
+		if (globals.enable_control_events) {
+			wsbridge_process_message(tech_pvt, wsi);
+		}
 
 		switch_mutex_lock(tech_pvt->write_mutex);
 		/* Check if what we have in buffer is enough to compose a frame, and we're skewing */
@@ -1450,7 +1453,7 @@ static switch_status_t channel_receive_message(switch_core_session_t *session, s
 		}
 		break;
 	case SWITCH_MESSAGE_INDICATE_MESSAGE:
-		{
+		if (globals.enable_control_events) {
 			channel_process_message(tech_pvt, (char*)msg->string_array_arg[2]);
 		}
 		break;
@@ -1983,6 +1986,7 @@ static switch_status_t load_config(void)
 		lws_set_log_level(0xF, ws_debug);
 #endif 
 	memset(&globals, 0, sizeof(globals));
+	globals.enable_control_events = 1;
 	switch_mutex_init(&globals.mutex, SWITCH_MUTEX_NESTED, module_pool);
 	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed\n", cf);
@@ -1997,6 +2001,8 @@ static switch_status_t load_config(void)
 
 			if (!strcmp(var, "debug")) {
 				globals.debug = atoi(val);
+			} else if (!strcmp(var, "enable_control_events")) {
+				globals.enable_control_events = atoi(val);
 			} else if (!strcmp(var, "ip")) {
 				set_global_ip(val);
 			} else if (!strcmp(var, "codec-master")) {
