@@ -37,6 +37,7 @@
 #include <switch.h>
 #include <switch_json.h>
 #include <libwebsockets.h>
+#pragma GCC diagnostic ignored "-Wimplicit-function-declaration"
 
 /*
  * Design Notes
