@@ -37,6 +37,7 @@
 #include <switch.h>
 #include <switch_json.h>
 #include <libwebsockets.h>
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
 
 /*
  * Design Notes
@@ -959,7 +960,21 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 		switch_safe_free(tech_pvt->databuf);
 		switch_safe_free(tech_pvt->write_data);
 
+		if (tech_pvt->context != NULL) {
+			lws_context_destroy(tech_pvt->context);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: DESTROYED tech_pvt->context = [%p]\n", __func__, (void*)tech_pvt->context);
+			tech_pvt->context = NULL;
+		}
+
+		switch_mutex_destroy(tech_pvt->read_mutex);
+		switch_mutex_destroy(tech_pvt->write_mutex);
+		switch_mutex_destroy(tech_pvt->flag_mutex);
+		switch_mutex_destroy(tech_pvt->wsi_mutex);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: FINISHED\n", __func__);
+
 	}
+
+	switch_mutex_destroy(globals.mutex);
 
 	return SWITCH_STATUS_SUCCESS;
 }
