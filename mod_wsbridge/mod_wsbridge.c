@@ -327,6 +327,7 @@ out:
 		switch_mutex_lock(globals.mutex);
 		switch_mutex_lock(tech_pvt->wsi_mutex);
 		lws_context_destroy(tech_pvt->context);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: DESTROYED tech_pvt->context = [%p]\n", __func__, (void*)tech_pvt->context);
 		tech_pvt->context = NULL;
 		switch_mutex_unlock(tech_pvt->wsi_mutex);
 		switch_mutex_unlock(globals.mutex);
@@ -791,6 +792,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 
 		tech_pvt->wscontext_destroyed = TRUE; 
 
+		channel_kill_channel(session,SWITCH_SIG_KILL);
 		break;
 	case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS:
 		if (globals.debug) {
