@@ -792,7 +792,6 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 
 		tech_pvt->wscontext_destroyed = TRUE; 
 
-		channel_kill_channel(session,SWITCH_SIG_KILL);
 		break;
 	case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS:
 		if (globals.debug) {
