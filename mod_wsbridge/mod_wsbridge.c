@@ -93,6 +93,8 @@
 
 #define DTMF_QUEUE_SIZE 100 /*digits*/
 
+#define EVENT_MESSAGE_MAX_SIZE 1024
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_wsbridge_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_wsbridge_shutdown);
 SWITCH_MODULE_DEFINITION(mod_wsbridge, mod_wsbridge_load, mod_wsbridge_shutdown, NULL);
@@ -913,16 +915,19 @@ static switch_status_t channel_on_execute(switch_core_session_t *session)
 	return SWITCH_STATUS_SUCCESS;
 }
 
-void send_bugfree_json_message(struct lws *wsi, cJSON* json_message) {
-	char *message = NULL;
-	if ((message = cJSON_PrintUnformatted(json_message)) != NULL) {
-		char *buf = NULL;
-		asprintf(&buf," %s", message);
-		if (websocket_write_back(wsi, LWS_WRITE_TEXT, buf, strlen(buf)) > 0) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "WebSockets sending JSON event: %s\n", message);
-		}
-		switch_safe_free(buf);
+void send_json_message(struct lws *wsi, cJSON* json_message) {
+	char buf[EVENT_MESSAGE_MAX_SIZE+2];
+	char *ptr = buf;
+	*ptr++ = ' ';
+	if (cJSON_PrintPreallocated(json_message, ptr, sizeof(buf)-1, 0) == FALSE) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "cJSON_PrintPreallocated FAILED\n");
+		return;
 	}
+	if (websocket_write_back(wsi, LWS_WRITE_TEXT, buf, strlen(buf)) <= 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "websocket_write_back FAILED\n");
+		return;
+	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "WebSockets sent JSON event: %s\n", buf);
 }
 
 void sendDisconnectMessage(private_t *tech_pvt) {
@@ -934,7 +939,7 @@ void sendDisconnectMessage(private_t *tech_pvt) {
 			cJSON_AddItemToObject(json_message, "event", cJSON_CreateString("websocket:disconnected"));
 			cJSON_AddItemToObject(json_message, "name_1", cJSON_CreateString("value_1"));
 			cJSON_AddItemToObject(json_message, "name_2", cJSON_CreateString("value_2"));
-			send_bugfree_json_message(tech_pvt->wsi_wsbridge, json_message);
+			send_json_message(tech_pvt->wsi_wsbridge, json_message);
 			cJSON_Delete(json_message);
 		}
 	}
