@@ -974,8 +974,6 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 
 	}
 
-	switch_mutex_destroy(globals.mutex);
-
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -1945,6 +1943,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_wsbridge_shutdown)
 	switch_safe_free(globals.codec_string);
 	switch_safe_free(globals.codec_rates_string);
 	switch_safe_free(globals.ip);
+	switch_mutex_destroy(globals.mutex);
 
 	return SWITCH_STATUS_SUCCESS;
 }
