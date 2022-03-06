@@ -37,6 +37,7 @@
 #include <switch.h>
 #include <switch_json.h>
 #include <libwebsockets.h>
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
 
 /*
  * Design Notes
@@ -134,6 +135,7 @@ static struct {
 } globals;
 
 struct private_object {
+	switch_thread_t *wsbridge_thread;
 	struct lws *wsi_wsbridge;
 	struct lws_context *context;
 	unsigned int flags;
@@ -322,15 +324,16 @@ out:   // close the connection specifically , lws_context_destroy() is doing it 
 #endif 
 
 out:
+#if 0
 	if (context && (!tech_pvt->wscontext_destroyed))  {
 		switch_mutex_lock(globals.mutex);
 		switch_mutex_lock(tech_pvt->wsi_mutex);
 		lws_context_destroy(tech_pvt->context);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: DESTROYED tech_pvt->context = [%p]\n", __func__, (void*)tech_pvt->context);
 		tech_pvt->context = NULL;
 		switch_mutex_unlock(tech_pvt->wsi_mutex);
 		switch_mutex_unlock(globals.mutex);
 	}
+#endif
 	
 
 	switch_mutex_lock(globals.mutex);
@@ -340,19 +343,24 @@ out:
 	}
 	switch_mutex_unlock(globals.mutex);
 
+	// terminate the thread
+	switch_thread_exit(thread, SWITCH_STATUS_SUCCESS);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: exited tech_pvt->wsbridge_thread = [%p]\n",
+					  __func__, (void*)tech_pvt->wsbridge_thread);
 	return NULL;
 }
 
 static void wsbridge_thread_launch(private_t *tech_pvt)
 {
-	switch_thread_t *thread;
 	switch_threadattr_t *thd_attr = NULL;
 
 	switch_threadattr_create(&thd_attr, module_pool);
 	switch_threadattr_detach_set(thd_attr, 1);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
 	tech_pvt->started = 0;
-	switch_thread_create(&thread, thd_attr, wsbridge_thread_run, tech_pvt, module_pool);
+	switch_thread_create(&tech_pvt->wsbridge_thread, thd_attr, wsbridge_thread_run, tech_pvt, module_pool);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: wsbridge_thread CREATED = [%p]\n",
+					  __func__, (void*)tech_pvt->wsbridge_thread);
 }
 
 static int
@@ -410,9 +418,11 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		assert(session != NULL);
 
 		tech_pvt = switch_core_session_get_private(session);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
-						  __func__, cJSON_Print(tech_pvt->message));
 		message = cJSON_PrintUnformatted(tech_pvt->message);
+		if (message) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: message = [%s]\n",
+							  __func__, message);
+		}
 		/* XXX EASY FIX FOR A STUPID BUG, look into this properly:
 			When the JSON structure is sent with no spaces, the audio we
 			get is garbage. So, we append a space as the first character.
@@ -782,6 +792,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		assert(session != NULL);
 
 		tech_pvt = switch_core_session_get_private(session);
+
 		if (tech_pvt) {
 			switch_mutex_lock(tech_pvt->flag_mutex);
 			tech_pvt->started = 1;
@@ -789,6 +800,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 			switch_mutex_unlock(tech_pvt->flag_mutex);
 		}
 
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: LWS_CALLBACK_WSI_DESTROY tech_pvt->context = [%p]\n", __func__, (void*)tech_pvt->context);
 		tech_pvt->wscontext_destroyed = TRUE; 
 		break;
 	case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS:
@@ -917,6 +929,7 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 {
 	switch_channel_t *channel = NULL;
 	private_t *tech_pvt = NULL;
+	switch_status_t rv;
 
 	channel = switch_core_session_get_channel(session);
 	assert(channel != NULL);
@@ -956,6 +969,19 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 			switch_safe_free(pop);
 		}
 
+		if (tech_pvt->wsbridge_thread) {
+			switch_thread_join(&rv, tech_pvt->wsbridge_thread);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: wsbridge_thread EXITED = [%p]\n",
+							  __func__, (void*)tech_pvt->wsbridge_thread);
+		}
+
+		if (tech_pvt->context) {
+			lws_context_destroy(tech_pvt->context);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: DESTROYED tech_pvt->context = [%p]\n",
+							  __func__, (void*)tech_pvt->context);
+			tech_pvt->context = NULL;
+		}
+
 		switch_safe_free(tech_pvt->databuf);
 		switch_safe_free(tech_pvt->write_data);
 
@@ -969,6 +995,7 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 
 	}
 
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: session = [%p]\n", __func__, (void*)session);
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -1661,6 +1688,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 		wsbridge_thread_launch(tech_pvt);
 
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: session = [%p]\n", __func__, (void*)*new_session);
 		return SWITCH_CAUSE_SUCCESS;
 	}
 
