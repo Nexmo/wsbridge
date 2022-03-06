@@ -37,7 +37,6 @@
 #include <switch.h>
 #include <switch_json.h>
 #include <libwebsockets.h>
-#pragma GCC diagnostic ignored "-Wstringop-truncation"
 
 /*
  * Design Notes
