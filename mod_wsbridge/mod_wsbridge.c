@@ -389,7 +389,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 					 void *user, void *in, size_t len)
 {
 	int bytes_sent = 0;
-	static char *message;
+	char *message;
 	char *bugfree_message;
 	switch_core_session_t *session;
 	switch_channel_t *channel;
@@ -409,9 +409,10 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		assert(session != NULL);
 
 		tech_pvt = switch_core_session_get_private(session);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
-						  __func__, cJSON_Print(tech_pvt->message));
 		message = cJSON_PrintUnformatted(tech_pvt->message);
+		if (!message) {
+			return -1;
+		}
 		/* XXX EASY FIX FOR A STUPID BUG, look into this properly:
 			When the JSON structure is sent with no spaces, the audio we
 			get is garbage. So, we append a space as the first character.
@@ -420,8 +421,13 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 		/* 2 extra bytes, 1 for the terminator '\0' and another for the empty space */
 		size = strlen(message);
 		bugfree_message = (char*) calloc(size + 2, sizeof(char));
+		if (!bugfree_message) {
+			free(message);
+			return -1;
+		}
 		bugfree_message[0] = ' ';
-		strncpy(bugfree_message + 1, message, size);
+		memcpy(bugfree_message + 1, message, size);
+		free(message);
 
 		switch_log_printf(
 			SWITCH_CHANNEL_LOG,
@@ -505,6 +511,8 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 
 		if (!lws_is_final_fragment(wsi)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "WebSockets RX: Not final fragment\n");
+			switch_mutex_unlock(tech_pvt->wsi_mutex);
+			switch_mutex_unlock(tech_pvt->read_mutex);
 			return 0;
 		}
 		if (lws_frame_is_binary(tech_pvt->wsi_wsbridge)) {
@@ -523,7 +531,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 			}
 			switch_mutex_unlock(tech_pvt->read_mutex);
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "WebSockets RX: Frame not received in binary mode, will drop: [%s] \n", (char *)in);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "WebSockets RX: Frame not received in binary mode, will drop: [%.*s] \n", (int)len, (char *)in);
 		}
 			
 		n = lws_remaining_packet_payload(tech_pvt->wsi_wsbridge);
@@ -650,16 +658,19 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 				cJSON *dtmf_json = cJSON_CreateObject();
 				char *dtmf_json_unformatted = NULL;
 				char *bugfree_message = NULL;
+				char digit_str[2] = { 0 };
 				size_t size = 0;
-
-				if (dtmf_json == NULL) {
-					switch_mutex_unlock(tech_pvt->dtmf_mutex);
-					return SWITCH_STATUS_FALSE;
-				}
 
 				dtmf = (switch_dtmf_t *) pop;
 
-				dtmf_digit_json = cJSON_CreateString(&dtmf->digit); // [0-9], #
+				if (dtmf_json == NULL) {
+					switch_safe_free(pop);
+					switch_mutex_unlock(tech_pvt->dtmf_mutex);
+					return -1;
+				}
+
+				digit_str[0] = dtmf->digit;
+				dtmf_digit_json = cJSON_CreateString(digit_str); // [0-9], #
 				cJSON_AddItemToObject(dtmf_json, "digit", dtmf_digit_json);
 
 				duration_ms = (unsigned int)(dtmf->duration / (unsigned int)(rate / 1000));
@@ -669,7 +680,13 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Dequeue DTMF %c:%d | rate: %d | duration_ms: %u\n", dtmf->digit, dtmf->duration, rate, duration_ms);
 
-				dtmf_json_unformatted = cJSON_PrintUnformatted(dtmf_json); // this bug again ?
+				dtmf_json_unformatted = cJSON_PrintUnformatted(dtmf_json);
+				cJSON_Delete(dtmf_json);
+				if (!dtmf_json_unformatted) {
+					switch_safe_free(pop);
+					switch_mutex_unlock(tech_pvt->dtmf_mutex);
+					return -1;
+				}
 				/* XXX EASY FIX FOR A STUPID BUG, look into this properly:
 					When the JSON structure is sent with no spaces, the audio we
 					get is garbage. So, we append a space as the first character.
@@ -681,7 +698,8 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 				assert (bugfree_message != NULL);
 
 				bugfree_message[0] = ' ';
-				strncpy(bugfree_message + 1, dtmf_json_unformatted, size);
+				memcpy(bugfree_message + 1, dtmf_json_unformatted, size);
+				free(dtmf_json_unformatted);
 
 				switch_log_printf(
 					SWITCH_CHANNEL_LOG,
@@ -691,13 +709,14 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 
 				websocket_write_back(wsi, LWS_WRITE_TEXT, bugfree_message, strlen(bugfree_message));
 
-				cJSON_Delete(dtmf_json);
 				free(bugfree_message);
 				switch_safe_free(pop);
 			}
-	
-			// everything has been dequeued. 
-			tech_pvt->has_dtmf = FALSE;
+
+			// send one digit per writable callback; clear only once drained
+			if (!switch_queue_size(tech_pvt->dtmf_queue)) {
+				tech_pvt->has_dtmf = FALSE;
+			}
 		}
 		switch_mutex_unlock(tech_pvt->dtmf_mutex);
 		switch_mutex_lock(tech_pvt->write_mutex);
@@ -712,7 +731,7 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "tmp_frame [%p]\n", tmp_frame);
 					}
 					memcpy(tmp_frame, tech_pvt->write_data + tech_pvt->write_start, amount);
-					memcpy(tmp_frame + amount, tech_pvt->write_data + ((tech_pvt->frame_sz * sizeof(int16_t)) - amount), (tech_pvt->frame_sz * sizeof(int16_t) - amount));
+					memcpy(tmp_frame + amount, tech_pvt->write_data, (tech_pvt->frame_sz * sizeof(int16_t) - amount));
 					bytes_sent = websocket_write_back(wsi, LWS_WRITE_BINARY, tmp_frame, tech_pvt->frame_sz * sizeof(int16_t));
 					switch_safe_free(tmp_frame);
 				}
@@ -720,8 +739,15 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 				bytes_sent = websocket_write_back(wsi, LWS_WRITE_BINARY, tech_pvt->write_data + tech_pvt->write_start, tech_pvt->frame_sz * sizeof(int16_t));
 			}
 
+			if (bytes_sent < 0) {
+				bytes_sent = 0;
+			}
+			if ((unsigned int)bytes_sent > tech_pvt->write_count) {
+				bytes_sent = tech_pvt->write_count;
+			}
+
 			tech_pvt->ws_counter_write++;
-                   
+
 			tech_pvt->write_start = (tech_pvt->write_start + bytes_sent) % tech_pvt->output_buffer_sz;
 			if (tech_pvt->write_start >= tech_pvt->output_buffer_sz) {
 				tech_pvt->write_start = 0;
@@ -786,9 +812,8 @@ wsbridge_callback_ws(struct lws *wsi, enum lws_callback_reasons reason,
 			tech_pvt->started = 1;
 			tech_pvt->state = WSBRIDGE_STATE_DESTROY;
 			switch_mutex_unlock(tech_pvt->flag_mutex);
+			tech_pvt->wscontext_destroyed = TRUE;
 		}
-
-		tech_pvt->wscontext_destroyed = TRUE; 
 
 		break;
 	case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS:
@@ -864,8 +889,6 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 			cJSON_Delete(tech_pvt->message);
 			tech_pvt->message = json_req;
 			cJSON_AddItemToObject(json_req, "content-type", cJSON_CreateString(tech_pvt->content_type));
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s: tech_pvt->message = [%s]\n",
-							  __func__, cJSON_Print(tech_pvt->message));
 		}
 	}
 
@@ -1153,6 +1176,9 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 		int bytes, rb; 
 
 		rb = switch_buffer_read(tech_pvt->ws_audio_buffer, tech_pvt->databuf, tech_pvt->frame_sz * sizeof(int16_t));
+		if (rb < (int)(tech_pvt->frame_sz * sizeof(int16_t))) {
+			memset(tech_pvt->databuf + rb, 0, tech_pvt->frame_sz * sizeof(int16_t) - rb);
+		}
 		bytes = switch_buffer_inuse(tech_pvt->ws_audio_buffer);
 
 		tech_pvt->read_frame.data = tech_pvt->databuf;
@@ -1455,6 +1481,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 			wsbridge_strncpy_null_term(parsed_ws_headers, ws_headers, WS_HEADERS_MAX_SIZE);
 			json_req = cJSON_Parse(parsed_ws_headers);
+			tech_pvt->message = json_req; /* freed in channel_on_destroy on any error path below */
 
 			/* Failed to parse JSON headers */
 			if (json_req == NULL) {
@@ -1508,13 +1535,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		}
 
 		if (tech_pvt->frame_sz) {
-			if (session) {
-				switch_core_timer_init(&tech_pvt->write_rtp_timer, "soft", PTIME_RTP_MS, tech_pvt->frame_sz, switch_core_session_get_pool(session));
-				switch_core_timer_init(&tech_pvt->ws_timer, "soft", WS_TIMER_MS, tech_pvt->frame_sz, switch_core_session_get_pool(session));
-			} else {
-				switch_core_timer_init(&tech_pvt->write_rtp_timer, "soft", PTIME_RTP_MS, tech_pvt->frame_sz, module_pool);
-				switch_core_timer_init(&tech_pvt->ws_timer, "soft", WS_TIMER_MS, tech_pvt->frame_sz, module_pool);
-			}
+			/* allocate from our own session's pool, not the peer's */
+			switch_core_timer_init(&tech_pvt->write_rtp_timer, "soft", PTIME_RTP_MS, tech_pvt->frame_sz, switch_core_session_get_pool(*new_session));
+			switch_core_timer_init(&tech_pvt->ws_timer, "soft", WS_TIMER_MS, tech_pvt->frame_sz, switch_core_session_get_pool(*new_session));
 
 			switch_zmalloc(tech_pvt->write_data, tech_pvt->frame_sz * 2 * FRAMES_NR);  // bytes  WSBRIDGE_OUTPUT_BUFFER_SIZE
 			switch_zmalloc(tech_pvt->databuf, tech_pvt->frame_sz * 2);  // bytes tech_pvt->frame_sz * sizeof(int16_t)
@@ -1533,7 +1556,8 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		// incoming WS buffer 
 		if (switch_buffer_create_dynamic(&tech_pvt->ws_audio_buffer,  tech_pvt->frame_sz * 2, WS_AUDIO_BUFFER_SIZE * tech_pvt->frame_sz * 2, 0) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Memory Error!\n");
-			return SWITCH_STATUS_MEMERR;
+			switch_core_session_destroy(new_session);
+			return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 		}
 
 		/* Add content-type to JSON message sent on handshake */
@@ -1546,7 +1570,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 		/* Set the actual thing up here */
 		if (lws_parse_uri((char*) ws_uri, &prot, &tech_pvt->i.address, &tech_pvt->i.port, &p)) {
-			/* XXX Error */
+			switch_core_session_destroy(new_session);
 			return SWITCH_CAUSE_INVALID_URL;
 		}
 
@@ -1858,8 +1882,6 @@ static switch_status_t load_config(void)
 		}
 	}
 
-	globals.debug = 0; // turn it on for more debugging info  
-
 	if (!globals.dialplan) {
 		set_global_dialplan("default");
 	}
@@ -1914,16 +1936,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_wsbridge_load)
 
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_wsbridge_shutdown)
 {
-	int x = 0;
-
-	running = -1;
-
-	while (running) {
-		if (x++ > 100) {
-			break;
-		}
-		switch_yield(20000);
-	}
+	running = 0;
 
 	/* Free dynamically allocated strings */
 	switch_safe_free(globals.dialplan);
